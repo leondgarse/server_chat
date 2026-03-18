@@ -13,11 +13,26 @@ class FileEditTab extends StatefulWidget {
 }
 
 class _FileEditTabState extends State<FileEditTab> {
-  final TextEditingController _pathController = TextEditingController(text: '~');
+  final TextEditingController _pathController = TextEditingController();
   final TextEditingController _contentController = TextEditingController();
-  
+  bool _pathInitialized = false;
+
   bool _isLoading = false;
   bool _isSaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Rebuild when content changes so the Save button enables/disables correctly.
+    _contentController.addListener(() => setState(() {}));
+  }
+
+  @override
+  void dispose() {
+    _pathController.dispose();
+    _contentController.dispose();
+    super.dispose();
+  }
 
   Future<void> _loadFile() async {
     final state = Provider.of<AppState>(context, listen: false);
@@ -72,8 +87,17 @@ class _FileEditTabState extends State<FileEditTab> {
     }
   }
 
+  void _initPathIfNeeded(AppState state) {
+    if (!_pathInitialized && state.isConnected) {
+      _pathController.text = state.currentPath;
+      _pathInitialized = true;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final state = Provider.of<AppState>(context);
+    _initPathIfNeeded(state);
     return Scaffold(
       appBar: AppBar(
         title: const Text('File Editor'),
@@ -108,6 +132,11 @@ class _FileEditTabState extends State<FileEditTab> {
                            );
                            if (path != null) {
                              _pathController.text = path;
+                             // Sync parent directory as shared cwd
+                             final parent = path.contains('/')
+                                 ? path.substring(0, path.lastIndexOf('/'))
+                                 : path;
+                             if (parent.isNotEmpty) state.setCurrentPath(parent);
                              _loadFile();
                            }
                         },

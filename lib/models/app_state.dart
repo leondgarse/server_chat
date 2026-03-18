@@ -5,6 +5,14 @@ import '../services/ssh_service.dart';
 class AppState extends ChangeNotifier {
   final SSHService sshService = SSHService();
 
+  AppState() {
+    // When the SSH socket drops unexpectedly, update the UI immediately.
+    sshService.onDisconnected = () {
+      _currentPath = '/';
+      notifyListeners();
+    };
+  }
+
   bool _isConnecting = false;
   bool get isConnecting => _isConnecting;
 
@@ -49,10 +57,16 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Set cwd directly with an already-resolved absolute path (no SSH round-trip).
+  void setCurrentPath(String path) {
+    _currentPath = path;
+    notifyListeners();
+  }
+
+  /// Validate and update cwd via SSH (for user-typed paths from the UI).
   Future<void> updatePath(String path) async {
     if (!isConnected) return;
     try {
-       // Validate path exists and is a directory
        final result = await sshService.executeCommand('cd "$path" && pwd');
        if (result.trim().isNotEmpty && !result.toLowerCase().contains('no such file')) {
          _currentPath = result.trim();

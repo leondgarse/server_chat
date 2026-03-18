@@ -21,14 +21,9 @@ class _TerminalTabState extends State<TerminalTab> with AutomaticKeepAliveClient
   final List<String> _cmdHistory = [];
   int _historyIndex = -1;
   bool _isExecuting = false;
-  String? _currentDir; // null means not yet resolved
 
   @override
   bool get wantKeepAlive => true; // Keep state when switching tabs
-
-  String _getDir(AppState state) {
-    return _currentDir ?? state.sshService.homeDir;
-  }
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -89,7 +84,7 @@ class _TerminalTabState extends State<TerminalTab> with AutomaticKeepAliveClient
         MaterialPageRoute(
           builder: (_) => ChangeNotifierProvider.value(
             value: state,
-            child: InteractiveShellPage(command: cmd, workingDir: _getDir(state)),
+            child: InteractiveShellPage(command: cmd, workingDir: state.currentPath),
           ),
         ),
       );
@@ -104,10 +99,10 @@ class _TerminalTabState extends State<TerminalTab> with AutomaticKeepAliveClient
     _scrollToBottom();
 
     try {
-      final dir = _getDir(state);
+      final dir = state.currentPath;
       bool isCd = cmd.startsWith('cd ') || cmd == 'cd';
-      
-      String actualCmd;
+
+      final String actualCmd;
       if (isCd) {
         actualCmd = 'cd "$dir" && $cmd && pwd';
       } else {
@@ -116,18 +111,20 @@ class _TerminalTabState extends State<TerminalTab> with AutomaticKeepAliveClient
 
       final output = await state.sshService.executeCommand(actualCmd);
       final cleanOutput = output.trim();
-      
-      setState(() {
-        if (isCd) {
-          if (!cleanOutput.contains('No such file') && !cleanOutput.contains('Not a directory')) {
-             final lines = cleanOutput.split('\n');
-             _currentDir = lines.last.trim();
-          }
-          _messages.add(ChatMessage(text: cleanOutput.isEmpty ? '(changed dir)' : cleanOutput, isUser: false));
-        } else {
-          _messages.add(ChatMessage(text: cleanOutput, isUser: false));
+
+      if (isCd) {
+        if (!cleanOutput.contains('No such file') && !cleanOutput.contains('Not a directory')) {
+          final newDir = cleanOutput.split('\n').last.trim();
+          if (newDir.isNotEmpty) state.setCurrentPath(newDir);
         }
-      });
+        setState(() {
+          _messages.add(ChatMessage(text: cleanOutput.isEmpty ? '(changed dir)' : cleanOutput, isUser: false));
+        });
+      } else {
+        setState(() {
+          _messages.add(ChatMessage(text: cleanOutput, isUser: false));
+        });
+      }
     } catch (e) {
       setState(() {
         _messages.add(ChatMessage(text: "Error: $e", isUser: false));
@@ -220,7 +217,7 @@ class _TerminalTabState extends State<TerminalTab> with AutomaticKeepAliveClient
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin
     final state = Provider.of<AppState>(context);
-    final displayDir = _currentDir ?? (state.isConnected ? state.sshService.homeDir : '~');
+    final displayDir = state.isConnected ? state.currentPath : '~';
 
     return Scaffold(
       appBar: AppBar(

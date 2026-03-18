@@ -46,7 +46,7 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
 
   void _initPathIfNeeded(AppState state) {
     if (!_pathInitialized && state.isConnected) {
-      _pathController.text = state.sshService.homeDir;
+      _pathController.text = state.currentPath;
       _pathInitialized = true;
     }
   }
@@ -77,6 +77,7 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
     if (path.isEmpty) path = state.sshService.homeDir;
     path = state.sshService.resolvePath(path);
     _pathController.text = path;
+    state.setCurrentPath(path);
 
     if (!mounted) return;
     final mode = await showDialog<String>(
@@ -142,14 +143,15 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
     final resumeFlag  = _sessionId != null ? ' --resume $_sessionId' : '';
     final b64         = base64Encode(utf8.encode(trimmed));
 
-    // claude -p <prompt>  →  non-interactive print mode
+    // Use --print="$VAR" (= form) so the argument parser always treats the
+    // value as a literal string — a leading "-" in the prompt is never parsed
+    // as a flag name, unlike `claude -p "$VAR"` where argparse sees `-foo`.
     // --output-format stream-json --verbose  →  includes tool_result events
-    //   with the actual command output (ls, grep, etc.)
     // --dangerously-skip-permissions  →  no interactive prompts in print mode
     final command =
         'cd "$escapedPath" && '
         "CLAUDE_PROMPT=\$(printf '%s' '$b64' | base64 -d) && "
-        'NO_COLOR=1 claude -p "\$CLAUDE_PROMPT" '
+        'NO_COLOR=1 claude --print="\$CLAUDE_PROMPT" '
         '--output-format stream-json --verbose '
         '--dangerously-skip-permissions$resumeFlag';
 
@@ -345,7 +347,10 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
                             foldersOnly: true,
                           ),
                         );
-                        if (path != null) _pathController.text = path;
+                        if (path != null) {
+                          _pathController.text = path;
+                          state.setCurrentPath(path);
+                        }
                       },
                     ),
                     contentPadding: const EdgeInsets.symmetric(vertical: 0),
