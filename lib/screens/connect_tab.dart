@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/app_state.dart';
+import '../widgets/theme_switch_button.dart';
 
 class ConnectTab extends StatefulWidget {
   const ConnectTab({super.key});
@@ -19,6 +20,7 @@ class _ConnectTabState extends State<ConnectTab> {
   final _userController = TextEditingController();
   final _passController = TextEditingController();
   final _keyController  = TextEditingController();
+  final List<_TunnelRow> _tunnelRows = [];
 
   // Saved named profiles  { name: {host,port,user,pass,key} }
   Map<String, Map<String, String>> _profiles = {};
@@ -36,6 +38,7 @@ class _ConnectTabState extends State<ConnectTab> {
     _userController.dispose();
     _passController.dispose();
     _keyController.dispose();
+    for (final r in _tunnelRows) r.dispose();
     super.dispose();
   }
 
@@ -61,6 +64,7 @@ class _ConnectTabState extends State<ConnectTab> {
             _userController.text = j['user'] ?? '';
             _passController.text = j['pass'] ?? '';
             _keyController.text  = j['key']  ?? '';
+            _loadTunnelRows(j['tunnels'] as String? ?? '');
           });
         }
       }
@@ -72,6 +76,7 @@ class _ConnectTabState extends State<ConnectTab> {
           _userController.text = prefs.getString('user') ?? '';
           _passController.text = prefs.getString('pass') ?? '';
           _keyController.text  = prefs.getString('key')  ?? '';
+          _loadTunnelRows(prefs.getString('tunnels') ?? '');
         });
       } catch (_) {}
     }
@@ -93,11 +98,12 @@ class _ConnectTabState extends State<ConnectTab> {
 
   Future<void> _saveLastUsed() async {
     final config = {
-      'host': _hostController.text,
-      'port': _portController.text,
-      'user': _userController.text,
-      'pass': _passController.text,
-      'key':  _keyController.text,
+      'host':    _hostController.text,
+      'port':    _portController.text,
+      'user':    _userController.text,
+      'pass':    _passController.text,
+      'key':     _keyController.text,
+      'tunnels': _tunnelsString,
     };
     try {
       final file = await _getConfigFile();
@@ -125,6 +131,7 @@ class _ConnectTabState extends State<ConnectTab> {
       _userController.text = p['user'] ?? '';
       _passController.text = p['pass'] ?? '';
       _keyController.text  = p['key']  ?? '';
+      _loadTunnelRows(p['tunnels'] ?? '');
     });
   }
 
@@ -156,11 +163,12 @@ class _ConnectTabState extends State<ConnectTab> {
     if (name == null || name.isEmpty) return;
     setState(() {
       _profiles[name] = {
-        'host': _hostController.text,
-        'port': _portController.text,
-        'user': _userController.text,
-        'pass': _passController.text,
-        'key':  _keyController.text,
+        'host':    _hostController.text,
+        'port':    _portController.text,
+        'user':    _userController.text,
+        'pass':    _passController.text,
+        'key':     _keyController.text,
+        'tunnels': _tunnelsString,
       };
     });
     await _saveProfilesToPrefs();
@@ -191,6 +199,7 @@ class _ConnectTabState extends State<ConnectTab> {
       _userController.text,
       _passController.text.isNotEmpty ? _passController.text : null,
       _keyController.text.isNotEmpty  ? _keyController.text  : null,
+      tunnels: _tunnelsString.isNotEmpty ? _tunnelsString : null,
     );
     if (!context.mounted) return;
     if (state.isConnected) {
@@ -221,6 +230,7 @@ class _ConnectTabState extends State<ConnectTab> {
           SizedBox(width: 8),
           Text('TermiConnect'),
         ]),
+        actions: const [ThemeSwitchButton()],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
@@ -338,6 +348,70 @@ class _ConnectTabState extends State<ConnectTab> {
             ),
             const SizedBox(height: 24),
 
+            // ── Local port tunnels ─────────────────────────────────────────
+            Row(children: [
+              const Expanded(
+                child: Text('LOCAL TUNNELS',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
+              ),
+              TextButton.icon(
+                onPressed: () => setState(() => _tunnelRows.add(_TunnelRow())),
+                icon: const Icon(Icons.add, size: 16),
+                label: const Text('Add'),
+              ),
+            ]),
+            if (_tunnelRows.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Text(
+                  'No tunnels configured',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                ),
+              ),
+            ..._tunnelRows.asMap().entries.map((e) {
+              final i = e.key;
+              final row = e.value;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: row.local,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'Local port',
+                        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      ),
+                    ),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 8),
+                    child: Icon(Icons.arrow_forward, size: 16, color: Colors.grey),
+                  ),
+                  Expanded(
+                    child: TextField(
+                      controller: row.remote,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'Remote port',
+                        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.remove_circle_outline, color: Colors.red, size: 20),
+                    onPressed: () => setState(() {
+                      _tunnelRows[i].dispose();
+                      _tunnelRows.removeAt(i);
+                    }),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ]),
+              );
+            }),
+
+            const SizedBox(height: 24),
+
             // ── Buttons ───────────────────────────────────────────────────
             Row(children: [
               Expanded(
@@ -364,5 +438,45 @@ class _ConnectTabState extends State<ConnectTab> {
         ),
       ),
     );
+  }
+
+  // ── Tunnel helpers ──────────────────────────────────────────────────────────
+
+  /// Serialises tunnel rows as "localPort:localhost:remotePort\n…"
+  String get _tunnelsString => _tunnelRows
+      .where((r) => r.local.text.trim().isNotEmpty && r.remote.text.trim().isNotEmpty)
+      .map((r) => '${r.local.text.trim()}:localhost:${r.remote.text.trim()}')
+      .join('\n');
+
+  /// Populates [_tunnelRows] from the stored string format.
+  void _loadTunnelRows(String raw) {
+    for (final r in _tunnelRows) r.dispose();
+    _tunnelRows.clear();
+    for (final line in raw.split('\n')) {
+      final s = line.trim();
+      if (s.isEmpty) continue;
+      final parts = s.split(':');
+      if (parts.length < 3) continue;
+      _tunnelRows.add(_TunnelRow(
+        local: parts[0],
+        remote: parts.last,
+      ));
+    }
+  }
+}
+
+// ── Tunnel row model ──────────────────────────────────────────────────────────
+
+class _TunnelRow {
+  final TextEditingController local;
+  final TextEditingController remote;
+
+  _TunnelRow({String local = '', String remote = ''})
+      : local  = TextEditingController(text: local),
+        remote = TextEditingController(text: remote);
+
+  void dispose() {
+    local.dispose();
+    remote.dispose();
   }
 }

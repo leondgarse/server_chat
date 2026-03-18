@@ -4,6 +4,7 @@ import '../models/app_state.dart';
 import '../utils/theme.dart';
 import '../widgets/remote_path_picker.dart';
 import '../widgets/connection_button.dart';
+import '../widgets/theme_switch_button.dart';
 
 class FileEditTab extends StatefulWidget {
   const FileEditTab({super.key});
@@ -15,10 +16,9 @@ class FileEditTab extends StatefulWidget {
 class _FileEditTabState extends State<FileEditTab> {
   final TextEditingController _pathController = TextEditingController();
   final TextEditingController _contentController = TextEditingController();
-  bool _pathInitialized = false;
-
   bool _isLoading = false;
   bool _isSaving = false;
+  String _lastKnownPath = '';
 
   @override
   void initState() {
@@ -87,17 +87,23 @@ class _FileEditTabState extends State<FileEditTab> {
     }
   }
 
-  void _initPathIfNeeded(AppState state) {
-    if (!_pathInitialized && state.isConnected) {
-      _pathController.text = state.currentPath;
-      _pathInitialized = true;
+  void _syncCurrentPath(AppState state) {
+    if (!state.isConnected) return;
+    if (state.currentPath == _lastKnownPath) return;
+    _lastKnownPath = state.currentPath;
+    // Only auto-update the path field if no file content is currently loaded,
+    // so we don't clobber a path the user has already opened.
+    if (_contentController.text.isEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _pathController.text = state.currentPath;
+      });
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final state = Provider.of<AppState>(context);
-    _initPathIfNeeded(state);
+    _syncCurrentPath(state);
     return Scaffold(
       appBar: AppBar(
         title: const Text('File Editor'),
@@ -109,6 +115,7 @@ class _FileEditTabState extends State<FileEditTab> {
                 onPressed: _contentController.text.isNotEmpty ? _saveFile : null,
                 tooltip: 'Save File',
               ),
+          const ThemeSwitchButton(),
           const ConnectionButton(),
         ],
       ),

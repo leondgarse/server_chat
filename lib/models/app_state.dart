@@ -1,4 +1,5 @@
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../services/ssh_service.dart';
 
@@ -6,11 +7,43 @@ class AppState extends ChangeNotifier {
   final SSHService sshService = SSHService();
 
   AppState() {
-    // When the SSH socket drops unexpectedly, update the UI immediately.
     sshService.onDisconnected = () {
       _currentPath = '/';
       notifyListeners();
     };
+    _loadThemeMode();
+  }
+
+  // ── Theme ──────────────────────────────────────────────────────────────────
+
+  ThemeMode _themeMode = ThemeMode.system;
+  ThemeMode get themeMode => _themeMode;
+
+  Future<void> _loadThemeMode() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final val = prefs.getString('theme_mode') ?? 'system';
+      _themeMode = val == 'light'
+          ? ThemeMode.light
+          : val == 'dark'
+              ? ThemeMode.dark
+              : ThemeMode.system;
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<void> setThemeMode(ThemeMode mode) async {
+    _themeMode = mode;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final val = mode == ThemeMode.light
+          ? 'light'
+          : mode == ThemeMode.dark
+              ? 'dark'
+              : 'system';
+      await prefs.setString('theme_mode', val);
+    } catch (_) {}
   }
 
   bool _isConnecting = false;
@@ -25,7 +58,7 @@ class AppState extends ChangeNotifier {
   String _currentPath = '/';
   String get currentPath => _currentPath;
 
-  Future<void> connect(String host, int port, String username, String? password, String? privateKey) async {
+  Future<void> connect(String host, int port, String username, String? password, String? privateKey, {String? tunnels}) async {
     _isConnecting = true;
     _lastError = null;
     notifyListeners();
@@ -37,6 +70,7 @@ class AppState extends ChangeNotifier {
          username: username,
          password: password,
          privateKey: privateKey,
+         tunnels: tunnels,
        );
        
        if (sshService.isConnected) {

@@ -5,6 +5,7 @@ import '../models/app_state.dart';
 import '../models/chat_message.dart';
 import '../utils/theme.dart';
 import '../widgets/connection_button.dart';
+import '../widgets/theme_switch_button.dart';
 import 'interactive_shell_page.dart';
 
 class TerminalTab extends StatefulWidget {
@@ -37,7 +38,7 @@ class _TerminalTabState extends State<TerminalTab> with AutomaticKeepAliveClient
     });
   }
 
-  static const _interactiveCommands = {'python', 'python3', 'ipython', 'node', 'bash', 'zsh', 'sh', 'irb', 'sqlite3', 'mysql', 'psql', 'top', 'htop', 'vim', 'nano', 'less', 'more'};
+  static const _interactiveCommands = {'python', 'python3', 'ipython', 'node', 'bash', 'zsh', 'sh', 'irb', 'sqlite3', 'mysql', 'psql', 'top', 'htop', 'vim', 'nano', 'less', 'more', 'claude'};
 
   bool _isInteractiveCommand(String cmd) {
     final firstWord = cmd.split(' ').first.split('/').last;
@@ -233,6 +234,23 @@ class _TerminalTabState extends State<TerminalTab> with AutomaticKeepAliveClient
             onPressed: _historyDown,
             tooltip: 'Next command',
           ),
+          const ThemeSwitchButton(),
+          IconButton(
+            icon: const Icon(Icons.open_in_full, size: 20),
+            tooltip: 'Full terminal (PTY)',
+            onPressed: () {
+              if (!state.isConnected) return;
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => ChangeNotifierProvider.value(
+                  value: state,
+                  child: InteractiveShellPage(
+                    command: 'bash',
+                    workingDir: state.currentPath,
+                  ),
+                ),
+              ));
+            },
+          ),
           const ConnectionButton(),
         ],
       ),
@@ -275,13 +293,25 @@ class _TerminalTabState extends State<TerminalTab> with AutomaticKeepAliveClient
                   ),
                 ),
                 const SizedBox(width: 8),
-                CircleAvatar(
-                  backgroundColor: AppTheme.primaryBlue,
-                  child: IconButton(
-                    icon: const Icon(Icons.send, color: Colors.white),
-                    onPressed: _isExecuting ? null : _executeCommand,
+                if (_isExecuting)
+                  CircleAvatar(
+                    backgroundColor: Colors.red,
+                    child: IconButton(
+                      icon: const Icon(Icons.stop, color: Colors.white),
+                      onPressed: () {
+                        final state = Provider.of<AppState>(context, listen: false);
+                        state.sshService.cancelCommand();
+                      },
+                    ),
                   ),
-                ),
+                if (!_isExecuting)
+                  CircleAvatar(
+                    backgroundColor: AppTheme.primaryBlue,
+                    child: IconButton(
+                      icon: const Icon(Icons.send, color: Colors.white),
+                      onPressed: _executeCommand,
+                    ),
+                  ),
               ],
             ),
           ),

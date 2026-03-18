@@ -2,12 +2,14 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/app_state.dart';
 import '../models/chat_message.dart';
 import '../utils/theme.dart';
 import '../widgets/remote_path_picker.dart';
 import '../widgets/connection_button.dart';
+import '../widgets/theme_switch_button.dart';
 
 class ClaudeTab extends StatefulWidget {
   const ClaudeTab({super.key});
@@ -22,11 +24,13 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
   final ScrollController _scrollController = ScrollController();
 
   final List<ChatMessage> _messages = [];
+  final List<String> _promptHistory = [];
+  int _historyIndex = -1;
 
   String? _sessionId;
   bool _started   = false;
   bool _isSending = false;
-  bool _pathInitialized = false;
+  String _lastKnownPath = '';
 
   String _pendingText = '';
   String _lineBuffer  = '';
@@ -44,11 +48,41 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
     super.dispose();
   }
 
-  void _initPathIfNeeded(AppState state) {
-    if (!_pathInitialized && state.isConnected) {
-      _pathController.text = state.currentPath;
-      _pathInitialized = true;
+  void _syncCurrentPath(AppState state) {
+    if (!state.isConnected) return;
+    if (state.currentPath == _lastKnownPath) return;
+    _lastKnownPath = state.currentPath;
+    // Don't auto-update if a session is active — user may have set a specific path.
+    if (!_started && !_isSending) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _pathController.text = state.currentPath;
+      });
     }
+  }
+
+  void _historyUp() {
+    if (_promptHistory.isEmpty) return;
+    if (_historyIndex < _promptHistory.length - 1) {
+      _historyIndex++;
+      _promptController.text = _promptHistory[_promptHistory.length - 1 - _historyIndex];
+    }
+  }
+
+  void _historyDown() {
+    if (_historyIndex > 0) {
+      _historyIndex--;
+      _promptController.text = _promptHistory[_promptHistory.length - 1 - _historyIndex];
+    } else {
+      _historyIndex = -1;
+      _promptController.clear();
+    }
+  }
+
+  void _copyText(String text) {
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Copied'), duration: Duration(seconds: 1)),
+    );
   }
 
   void _scrollToBottom() {
@@ -129,6 +163,9 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
     final state = Provider.of<AppState>(context, listen: false);
     if (!state.isConnected) return;
 
+    _promptHistory.add(trimmed);
+    _historyIndex = -1;
+
     setState(() {
       _messages.add(ChatMessage(text: trimmed, isUser: true));
       _isSending   = true;
@@ -143,15 +180,14 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
     final resumeFlag  = _sessionId != null ? ' --resume $_sessionId' : '';
     final b64         = base64Encode(utf8.encode(trimmed));
 
-    // Use --print="$VAR" (= form) so the argument parser always treats the
-    // value as a literal string — a leading "-" in the prompt is never parsed
-    // as a flag name, unlike `claude -p "$VAR"` where argparse sees `-foo`.
+    // Decode prompt from base64 into a variable, then pass via -p.
+    // Using a variable avoids shell-quoting issues with special characters.
     // --output-format stream-json --verbose  →  includes tool_result events
     // --dangerously-skip-permissions  →  no interactive prompts in print mode
     final command =
         'cd "$escapedPath" && '
         "CLAUDE_PROMPT=\$(printf '%s' '$b64' | base64 -d) && "
-        'NO_COLOR=1 claude --print="\$CLAUDE_PROMPT" '
+        'NO_COLOR=1 claude -p "\$CLAUDE_PROMPT" '
         '--output-format stream-json --verbose '
         '--dangerously-skip-permissions$resumeFlag';
 
@@ -164,9 +200,14 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
         onDone: ()  { if (!done.isCompleted) done.complete(); },
         onError: (e){ if (!done.isCompleted) done.completeError(e); },
       );
-      _currentSession!.stderr.listen(
-        (d) { if (mounted) _handleChunk(utf8.decode(d, allowMalformed: true)); },
-      );
+      _currentSession!.stderr.listen((d) {
+        final text = utf8.decode(d, allowMalformed: true);
+        if (mounted &&
+            !text.contains('cannot set terminal process group') &&
+            !text.contains('no job control in this shell')) {
+          _handleChunk(text);
+        }
+      });
       await done.future;
     } catch (e) {
       if (mounted) setState(() => _messages.add(ChatMessage(text: 'Error: $e', isUser: false)));
@@ -281,8 +322,20 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
             color: AppTheme.primaryBlue,
             borderRadius: BorderRadius.circular(12).copyWith(topRight: Radius.zero),
           ),
-          child: SelectableText(msg.text,
-              style: const TextStyle(color: Colors.white, fontFamily: 'Space Grotesk')),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: SelectableText(msg.text,
+                    style: const TextStyle(color: Colors.white, fontFamily: 'Space Grotesk')),
+              ),
+              const SizedBox(width: 8),
+              InkWell(
+                onTap: () => _copyText(msg.text),
+                child: const Icon(Icons.copy, size: 14, color: Colors.white70),
+              ),
+            ],
+          ),
         ),
       );
     }
@@ -298,21 +351,34 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
           borderRadius: BorderRadius.circular(12).copyWith(topLeft: Radius.zero),
           border: Border.all(color: isDark ? AppTheme.borderDark : AppTheme.borderLight),
         ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          SelectableText(msg.text,
-              style: TextStyle(
-                color: isDark ? AppTheme.textPrimaryDark : AppTheme.textPrimaryLight,
-                fontFamily: 'monospace',
-                fontSize: 13,
-              )),
-          if (pending) ...[
-            const SizedBox(height: 6),
-            SizedBox(
-              width: 12, height: 12,
-              child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.primaryBlue),
+        child: Stack(
+          children: [
+            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              SelectableText(msg.text,
+                  style: TextStyle(
+                    color: isDark ? AppTheme.textPrimaryDark : AppTheme.textPrimaryLight,
+                    fontFamily: 'monospace',
+                    fontSize: 13,
+                  )),
+              if (pending) ...[
+                const SizedBox(height: 6),
+                SizedBox(
+                  width: 12, height: 12,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.primaryBlue),
+                ),
+              ],
+            ]),
+            Positioned(
+              top: 0,
+              right: 0,
+              child: InkWell(
+                onTap: () => _copyText(msg.text),
+                child: Icon(Icons.copy, size: 14,
+                    color: isDark ? Colors.white38 : Colors.black26),
+              ),
             ),
           ],
-        ]),
+        ),
       ),
     );
   }
@@ -321,12 +387,25 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
   Widget build(BuildContext context) {
     super.build(context);
     final state = Provider.of<AppState>(context);
-    _initPathIfNeeded(state);
+    _syncCurrentPath(state);
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Claude Chat'),
-        actions: const [ConnectionButton()],
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.arrow_upward, size: 20),
+            onPressed: _historyUp,
+            tooltip: 'Previous prompt',
+          ),
+          IconButton(
+            icon: const Icon(Icons.arrow_downward, size: 20),
+            onPressed: _historyDown,
+            tooltip: 'Next prompt',
+          ),
+          const ThemeSwitchButton(),
+          const ConnectionButton(),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(60),
           child: Padding(
