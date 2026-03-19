@@ -191,6 +191,7 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
         '--output-format stream-json --verbose '
         '--dangerously-skip-permissions$resumeFlag';
 
+    bool errorHandled = false;
     try {
       _currentSession = await state.sshService.startRawSession(command);
 
@@ -210,14 +211,34 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
       });
       await done.future;
     } catch (e) {
-      if (mounted) setState(() => _messages.add(ChatMessage(text: 'Error: $e', isUser: false)));
+      errorHandled = true;
+      if (mounted) {
+        setState(() {
+          // Save partial output BEFORE the error so message order is correct.
+          if (_pendingText.trim().isNotEmpty) {
+            _messages.add(ChatMessage(text: _pendingText.trim(), isUser: false));
+            _pendingText = '';
+          }
+          _messages.add(ChatMessage(text: _disconnectMessage(e), isUser: false));
+        });
+      }
     } finally {
       _currentSession = null;
       if (_lineBuffer.trim().isNotEmpty) _parseLine(_lineBuffer.trim());
       if (mounted) {
+        final connState = Provider.of<AppState>(context, listen: false);
         setState(() {
           if (_pendingText.trim().isNotEmpty) {
             _messages.add(ChatMessage(text: _pendingText.trim(), isUser: false));
+          }
+          // If the stream closed cleanly (onDone, no exception) but the SSH
+          // connection is gone, the remote process was killed by the disconnect.
+          if (!errorHandled && !connState.isConnected) {
+            _messages.add(ChatMessage(
+              text: '⚡ Connection lost — response may be incomplete.\n'
+                    'Session ID preserved. Tap Resume once reconnected.',
+              isUser: false,
+            ));
           }
           _isSending   = false;
           _pendingText = '';
@@ -226,6 +247,17 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
         _scrollToBottom();
       }
     }
+  }
+
+  /// Human-readable message for SSH/socket errors during a Claude session.
+  static String _disconnectMessage(dynamic e) {
+    final s = e.toString().toLowerCase();
+    if (s.contains('socket') || s.contains('closed') ||
+        s.contains('connection') || s.contains('pipe') || s.contains('eof')) {
+      return '⚡ Connection lost — response may be incomplete.\n'
+             'Session ID preserved. Tap Resume once reconnected.';
+    }
+    return 'Error: $e';
   }
 
   void _stopSession() {
