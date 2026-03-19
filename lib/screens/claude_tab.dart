@@ -4,6 +4,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/app_state.dart';
 import '../models/chat_message.dart';
 import '../utils/theme.dart';
@@ -36,8 +37,63 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
   String _lineBuffer  = '';
   SSHSession? _currentSession;
 
+  /// The CLI command used to invoke Claude (default: 'claude').
+  /// Can be a full path, shell alias, or wrapper function defined in .bashrc.
+  String _claudeCmd = 'claude';
+
   @override
   bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    SharedPreferences.getInstance().then((prefs) {
+      final saved = prefs.getString('claude_cmd');
+      if (saved != null && saved.trim().isNotEmpty && mounted) {
+        setState(() => _claudeCmd = saved.trim());
+      }
+    });
+  }
+
+  Future<void> _saveClaudeCmd(String cmd) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('claude_cmd', cmd);
+  }
+
+  Future<void> _showCmdDialog() async {
+    final ctrl = TextEditingController(text: _claudeCmd);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Claude Command'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: 'claude',
+                helperText: 'Command, path, alias, or .bashrc function',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (result != null && result.isNotEmpty) {
+      setState(() => _claudeCmd = result);
+      _saveClaudeCmd(result);
+    }
+  }
 
   @override
   void dispose() {
@@ -184,10 +240,11 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
     // Using a variable avoids shell-quoting issues with special characters.
     // --output-format stream-json --verbose  →  includes tool_result events
     // --dangerously-skip-permissions  →  no interactive prompts in print mode
+    final cmd = _claudeCmd.isEmpty ? 'claude' : _claudeCmd;
     final command =
         'cd "$escapedPath" && '
         "CLAUDE_PROMPT=\$(printf '%s' '$b64' | base64 -d) && "
-        'NO_COLOR=1 claude -p "\$CLAUDE_PROMPT" '
+        'NO_COLOR=1 $cmd -p "\$CLAUDE_PROMPT" '
         '--output-format stream-json --verbose '
         '--dangerously-skip-permissions$resumeFlag';
 
@@ -434,6 +491,11 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
             icon: const Icon(Icons.arrow_downward, size: 20),
             onPressed: _historyDown,
             tooltip: 'Next prompt',
+          ),
+          IconButton(
+            icon: const Icon(Icons.terminal, size: 20),
+            onPressed: _showCmdDialog,
+            tooltip: 'Claude command ($_claudeCmd)',
           ),
           const ThemeSwitchButton(),
           const ConnectionButton(),
