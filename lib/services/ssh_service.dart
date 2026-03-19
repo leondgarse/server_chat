@@ -246,7 +246,11 @@ class SSHService {
     // Extract the full interactive-shell PATH (conda, virtualenv, etc.) and
     // export it so subprocesses launched by the command (e.g. claude → python3)
     // see the correct PATH even though this session has no TTY.
+    // Also enable alias expansion and source .bashrc so user-defined aliases
+    // and shell functions (e.g. custom claude wrappers) are available.
     const pathFix =
+        r'shopt -s expand_aliases; '
+        r'[ -f ~/.bashrc ] && source ~/.bashrc >/dev/null 2>&1; '
         r'_P="$(bash -l -i -c "echo \$PATH" 2>/dev/null)"; [ -n "$_P" ] && export PATH="$_P"; unset _P';
     session.stdin.add(utf8.encode('$pathFix\n$command\n'));
     await session.stdin.close();

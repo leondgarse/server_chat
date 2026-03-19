@@ -4,6 +4,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/app_state.dart';
 import '../models/chat_message.dart';
 import '../utils/theme.dart';
@@ -36,8 +37,63 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
   String _lineBuffer  = '';
   SSHSession? _currentSession;
 
+  /// The CLI command used to invoke Claude (default: 'claude').
+  /// Can be a full path, shell alias, or wrapper function defined in .bashrc.
+  String _claudeCmd = 'claude';
+
   @override
   bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    SharedPreferences.getInstance().then((prefs) {
+      final saved = prefs.getString('claude_cmd');
+      if (saved != null && saved.trim().isNotEmpty && mounted) {
+        setState(() => _claudeCmd = saved.trim());
+      }
+    });
+  }
+
+  Future<void> _saveClaudeCmd(String cmd) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('claude_cmd', cmd);
+  }
+
+  Future<void> _showCmdDialog() async {
+    final ctrl = TextEditingController(text: _claudeCmd);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Claude Command'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: 'claude',
+                helperText: 'Command, path, alias, or .bashrc function',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (result != null && result.isNotEmpty) {
+      setState(() => _claudeCmd = result);
+      _saveClaudeCmd(result);
+    }
+  }
 
   @override
   void dispose() {
@@ -184,13 +240,15 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
     // Using a variable avoids shell-quoting issues with special characters.
     // --output-format stream-json --verbose  →  includes tool_result events
     // --dangerously-skip-permissions  →  no interactive prompts in print mode
+    final cmd = _claudeCmd.isEmpty ? 'claude' : _claudeCmd;
     final command =
         'cd "$escapedPath" && '
         "CLAUDE_PROMPT=\$(printf '%s' '$b64' | base64 -d) && "
-        'NO_COLOR=1 claude -p "\$CLAUDE_PROMPT" '
+        'NO_COLOR=1 $cmd -p "\$CLAUDE_PROMPT" '
         '--output-format stream-json --verbose '
         '--dangerously-skip-permissions$resumeFlag';
 
+    bool errorHandled = false;
     try {
       _currentSession = await state.sshService.startRawSession(command);
 
@@ -210,14 +268,34 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
       });
       await done.future;
     } catch (e) {
-      if (mounted) setState(() => _messages.add(ChatMessage(text: 'Error: $e', isUser: false)));
+      errorHandled = true;
+      if (mounted) {
+        setState(() {
+          // Save partial output BEFORE the error so message order is correct.
+          if (_pendingText.trim().isNotEmpty) {
+            _messages.add(ChatMessage(text: _pendingText.trim(), isUser: false));
+            _pendingText = '';
+          }
+          _messages.add(ChatMessage(text: _disconnectMessage(e), isUser: false));
+        });
+      }
     } finally {
       _currentSession = null;
       if (_lineBuffer.trim().isNotEmpty) _parseLine(_lineBuffer.trim());
       if (mounted) {
+        final connState = Provider.of<AppState>(context, listen: false);
         setState(() {
           if (_pendingText.trim().isNotEmpty) {
             _messages.add(ChatMessage(text: _pendingText.trim(), isUser: false));
+          }
+          // If the stream closed cleanly (onDone, no exception) but the SSH
+          // connection is gone, the remote process was killed by the disconnect.
+          if (!errorHandled && !connState.isConnected) {
+            _messages.add(ChatMessage(
+              text: '⚡ Connection lost — response may be incomplete.\n'
+                    'Session ID preserved. Tap Resume once reconnected.',
+              isUser: false,
+            ));
           }
           _isSending   = false;
           _pendingText = '';
@@ -226,6 +304,17 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
         _scrollToBottom();
       }
     }
+  }
+
+  /// Human-readable message for SSH/socket errors during a Claude session.
+  static String _disconnectMessage(dynamic e) {
+    final s = e.toString().toLowerCase();
+    if (s.contains('socket') || s.contains('closed') ||
+        s.contains('connection') || s.contains('pipe') || s.contains('eof')) {
+      return '⚡ Connection lost — response may be incomplete.\n'
+             'Session ID preserved. Tap Resume once reconnected.';
+    }
+    return 'Error: $e';
   }
 
   void _stopSession() {
@@ -402,6 +491,11 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
             icon: const Icon(Icons.arrow_downward, size: 20),
             onPressed: _historyDown,
             tooltip: 'Next prompt',
+          ),
+          IconButton(
+            icon: const Icon(Icons.terminal, size: 20),
+            onPressed: _showCmdDialog,
+            tooltip: 'Claude command ($_claudeCmd)',
           ),
           const ThemeSwitchButton(),
           const ConnectionButton(),
