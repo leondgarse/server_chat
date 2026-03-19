@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 
@@ -277,5 +278,133 @@ class SSHService {
     session.stdin.add(utf8.encode(content));
     await session.stdin.close();
     await session.done;
+  }
+
+  /// Upload a local file to a remote path via SFTP with optional progress.
+  Future<void> uploadFile(
+    String localPath,
+    String remotePath, {
+    void Function(int sent, int total)? onProgress,
+  }) async {
+    if (!isConnected) throw Exception('Not connected to SSH server');
+    final sftp = await _client!.sftp();
+    final localFile = File(localPath);
+    final total = await localFile.length();
+    final remote = await sftp.open(
+      remotePath,
+      mode: SftpFileOpenMode.create | SftpFileOpenMode.write | SftpFileOpenMode.truncate,
+    );
+    int sent = 0;
+    await remote.write(
+      localFile.openRead().map((chunk) {
+        final bytes = Uint8List.fromList(chunk);
+        sent += bytes.length;
+        onProgress?.call(sent, total);
+        return bytes;
+      }),
+    );
+    await remote.close();
+  }
+
+  /// Download a remote file to a local path via SFTP with optional progress.
+  Future<void> downloadFile(
+    String remotePath,
+    String localPath, {
+    void Function(int received, int total)? onProgress,
+  }) async {
+    if (!isConnected) throw Exception('Not connected to SSH server');
+    final sftp = await _client!.sftp();
+    final remote = await sftp.open(remotePath, mode: SftpFileOpenMode.read);
+    final stat = await remote.stat();
+    final total = stat.size ?? 0;
+    final localFile = File(localPath);
+    await localFile.parent.create(recursive: true);
+    final sink = localFile.openWrite();
+    int received = 0;
+    await for (final chunk in remote.read()) {
+      received += chunk.length;
+      onProgress?.call(received, total);
+      sink.add(chunk);
+    }
+    await sink.flush();
+    await sink.close();
+    await remote.close();
+  }
+
+  /// Check whether a remote path is a directory (via SFTP stat).
+  Future<bool> isRemoteDirectory(String remotePath) async {
+    if (!isConnected) throw Exception('Not connected to SSH server');
+    final sftp = await _client!.sftp();
+    try {
+      final stat = await sftp.stat(remotePath);
+      // S_IFDIR = 0x4000; file type occupies bits 12–15 of permissions.
+      return ((stat.permissions ?? 0) & 0xF000) == 0x4000;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// List a remote directory via SFTP.
+  Future<List<SftpName>> sftpListDir(String remotePath) async {
+    if (!isConnected) throw Exception('Not connected to SSH server');
+    final sftp = await _client!.sftp();
+    return sftp.readdir(remotePath);
+  }
+
+  /// Upload a local directory recursively to [remoteBasePath] via SFTP.
+  Future<void> uploadDirectory(
+    String localDirPath,
+    String remoteBasePath, {
+    void Function(String file)? onProgress,
+  }) async {
+    if (!isConnected) throw Exception('Not connected to SSH server');
+    final sftp = await _client!.sftp();
+
+    Future<void> doUpload(String localPath, String remotePath) async {
+      try { await sftp.mkdir(remotePath); } catch (_) {}
+      final dir = Directory(localPath);
+      await for (final entity in dir.list()) {
+        final name = entity.path.split('/').last;
+        final childRemote = '$remotePath/$name';
+        if (entity is Directory) {
+          await doUpload(entity.path, childRemote);
+        } else if (entity is File) {
+          onProgress?.call(entity.path);
+          await uploadFile(entity.path, childRemote);
+        }
+      }
+    }
+
+    final dirName = localDirPath.split('/').last;
+    await doUpload(localDirPath, '$remoteBasePath/$dirName');
+  }
+
+  /// Download a remote directory recursively to [localBasePath] via SFTP.
+  Future<void> downloadDirectory(
+    String remoteDirPath,
+    String localBasePath, {
+    void Function(String file)? onProgress,
+  }) async {
+    if (!isConnected) throw Exception('Not connected to SSH server');
+
+    Future<void> doDownload(String remotePath, String localPath) async {
+      await Directory(localPath).create(recursive: true);
+      final items = await sftpListDir(remotePath);
+      for (final item in items) {
+        if (item.filename == '.' || item.filename == '..') continue;
+        final childRemote = '$remotePath/${item.filename}';
+        final childLocal = '$localPath/${item.filename}';
+        final isDir = ((item.attr.permissions ?? 0) & 0xF000) == 0x4000;
+        if (isDir) {
+          await doDownload(childRemote, childLocal);
+        } else {
+          onProgress?.call(childRemote);
+          await downloadFile(childRemote, childLocal);
+        }
+      }
+    }
+
+    final dirName = remoteDirPath.split('/').last;
+    await doDownload(remoteDirPath, '$localBasePath/$dirName');
   }
 }

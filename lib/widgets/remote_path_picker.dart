@@ -5,11 +5,15 @@ import '../models/app_state.dart';
 class RemotePathPickerDialog extends StatefulWidget {
   final String initialPath;
   final bool foldersOnly;
+  /// When true, shows a "Select This Folder" button even when [foldersOnly] is false,
+  /// allowing the caller to receive either a file path or the current directory path.
+  final bool showSelectDir;
 
   const RemotePathPickerDialog({
-    super.key, 
+    super.key,
     required this.initialPath,
     this.foldersOnly = false,
+    this.showSelectDir = false,
   });
 
   @override
@@ -120,10 +124,10 @@ class _RemotePathPickerDialogState extends State<RemotePathPickerDialog> {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                if (widget.foldersOnly)
+                if (widget.foldersOnly || widget.showSelectDir)
                   ElevatedButton(
                     onPressed: () => Navigator.of(context).pop(_currentPath),
-                    child: const Text('Select'),
+                    child: Text(widget.foldersOnly ? 'Select' : 'Select Folder'),
                   )
               ],
             ),
