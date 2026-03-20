@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/app_state.dart';
 import '../models/chat_message.dart';
+import '../utils/text_truncator.dart';
 import '../utils/theme.dart';
 import '../widgets/remote_path_picker.dart';
 import '../widgets/connection_button.dart';
@@ -23,6 +24,8 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
   final TextEditingController _promptController = TextEditingController();
   final TextEditingController _pathController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  final FocusNode _pathFocus = FocusNode();
+  bool _pathFocused = false;
 
   final List<ChatMessage> _messages = [];
   final List<String> _promptHistory = [];
@@ -47,6 +50,8 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
   @override
   void initState() {
     super.initState();
+    _pathFocus.addListener(() => setState(() => _pathFocused = _pathFocus.hasFocus));
+    _pathController.addListener(() => setState(() {}));
     SharedPreferences.getInstance().then((prefs) {
       final saved = prefs.getString('claude_cmd');
       if (saved != null && saved.trim().isNotEmpty && mounted) {
@@ -64,29 +69,52 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
     final ctrl = TextEditingController(text: _claudeCmd);
     final result = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Claude Command'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            TextField(
-              controller: ctrl,
-              autofocus: true,
-              decoration: const InputDecoration(
-                hintText: 'claude',
-                helperText: 'Command, path, alias, or .bashrc function',
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Claude Command'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: ctrl,
+                autofocus: true,
+                onChanged: (_) => setDialogState(() {}),
+                decoration: const InputDecoration(
+                  hintText: 'claude',
+                  labelText: 'Base command / alias / path',
+                  helperText: 'Alias or function from .bashrc is supported',
+                ),
               ),
+              const SizedBox(height: 12),
+              const Text('Full command that will run:',
+                  style: TextStyle(fontSize: 11, color: Colors.grey)),
+              const SizedBox(height: 4),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.black12,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: SelectableText(
+                  () {
+                    final cmd = ctrl.text.trim().isEmpty ? 'claude' : ctrl.text.trim();
+                    return '$cmd -p "\$CLAUDE_PROMPT" --output-format stream-json --verbose --dangerously-skip-permissions';
+                  }(),
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              child: const Text('Save'),
             ),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-            child: const Text('Save'),
-          ),
-        ],
       ),
     );
     if (result != null && result.isNotEmpty) {
@@ -100,6 +128,7 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
     _currentSession?.close();
     _promptController.dispose();
     _pathController.dispose();
+    _pathFocus.dispose();
     _scrollController.dispose();
     super.dispose();
   }
@@ -343,10 +372,29 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
     }
   }
 
+  /// Returns true for lines that are bash interactive-shell noise injected by
+  /// `bash -i`: PS1 prompts, echoed stdin commands, and the logout message.
+  static bool _isShellNoise(String line) {
+    if (line == 'logout') return true;
+    // PS1 prompt or prompt+logout on the same line (e.g. "user@host:~$ logout")
+    if (line.contains(r'$ ') || line.contains(r'# ') ||
+        line.endsWith(r'$') || line.endsWith(r'#')) { return true; }
+    // Echoed fragments of the pathFix / command we wrote to stdin
+    if (line.contains('export PATH') || line.contains('unset _P') ||
+        line.contains('expand_aliases') || line.contains('shopt') ||
+        line.contains('base64 -d') || line.contains('CLAUDE_PROMPT') ||
+        line.contains('stream-json') || line.contains('dangerously-skip-permissions') ||
+        line.contains('output-format') || line.contains('NO_COLOR=')) { return true; }
+    return false;
+  }
+
   void _parseLine(String line) {
     if (!line.startsWith('{')) {
-      // Raw output (bash errors, PATH issues) — show directly
-      if (mounted) setState(() => _pendingText += '$line\n');
+      // Raw output (bash errors, PATH issues) — show directly, but suppress
+      // interactive-shell noise (PS1 prompts, echoed stdin, logout).
+      if (!_isShellNoise(line)) {
+        if (mounted) setState(() => _pendingText += '$line\n');
+      }
       return;
     }
     try {
@@ -504,31 +552,71 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
           preferredSize: const Size.fromHeight(60),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Row(children: [
-              Expanded(
-                child: TextField(
-                  controller: _pathController,
-                  decoration: InputDecoration(
-                    hintText: 'Project path',
-                    prefixIcon: IconButton(
-                      icon: const Icon(Icons.folder_open),
-                      onPressed: () async {
-                        final path = await showDialog<String>(
-                          context: context,
-                          builder: (c) => RemotePathPickerDialog(
-                            initialPath: _pathController.text,
-                            foldersOnly: true,
+            child: Row(
+              children: [
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final style = Theme.of(context).textTheme.bodyMedium!.copyWith(fontSize: 14);
+                      // prefixIcon=48, internal content padding≈12 each side
+                      const textStart = 60.0;
+                      const textEnd = 12.0;
+                      final availableWidth = constraints.maxWidth - textStart - textEnd;
+                      final truncated = !_pathFocused
+                          ? truncateLeft(_pathController.text, availableWidth, style)
+                          : _pathController.text;
+                      return Stack(
+                        children: [
+                          TextField(
+                            controller: _pathController,
+                            focusNode: _pathFocus,
+                            textAlign: TextAlign.left,
+                            textAlignVertical: TextAlignVertical.top,
+                            maxLines: 1,
+                            style: _pathFocused ? style : style.copyWith(color: Colors.transparent),
+                            decoration: InputDecoration(
+                              hintText: _pathController.text.isEmpty ? 'Project path' : null,
+                              prefixIcon: IconButton(
+                                icon: const Icon(Icons.folder_open),
+                                onPressed: () async {
+                                  final path = await showDialog<String>(
+                                    context: context,
+                                    builder: (c) => RemotePathPickerDialog(
+                                      initialPath: _pathController.text,
+                                      foldersOnly: true,
+                                    ),
+                                  );
+                                  if (path != null) {
+                                    _pathController.text = path;
+                                    state.setCurrentPath(path);
+                                  }
+                                },
+                              ),
+                              contentPadding: const EdgeInsets.symmetric(vertical: 0),
+                            ),
                           ),
-                        );
-                        if (path != null) {
-                          _pathController.text = path;
-                          state.setCurrentPath(path);
-                        }
-                      },
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(vertical: 0),
+                          if (!_pathFocused && _pathController.text.isNotEmpty)
+                            Positioned(
+                              left: textStart,
+                              top: 0,
+                              bottom: 0,
+                              right: textEnd,
+                              child: IgnorePointer(
+                                child: Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: Text(
+                                    truncated,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.clip,
+                                    style: style,
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      );
+                    },
                   ),
-                ),
               ),
               const SizedBox(width: 8),
               if (!_started)
@@ -557,7 +645,10 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
           ),
         ),
       ),
-      body: Column(children: [
+      body: GestureDetector(
+        onTap: () => FocusScope.of(context).unfocus(),
+        behavior: HitTestBehavior.translucent,
+        child: Column(children: [
         Expanded(
           child: ListView.builder(
             controller: _scrollController,
@@ -621,6 +712,7 @@ class _ClaudeTabState extends State<ClaudeTab> with AutomaticKeepAliveClientMixi
           ]),
         ),
       ]),
+      ),
     );
   }
 }

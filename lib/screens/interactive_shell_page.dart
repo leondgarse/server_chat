@@ -218,7 +218,10 @@ class _InteractiveShellPageState extends State<InteractiveShellPage> {
       appBar: AppBar(
         title: Text(widget.command),
       ),
-      body: Column(
+      body: GestureDetector(
+        onTap: () => FocusScope.of(context).unfocus(),
+        behavior: HitTestBehavior.translucent,
+        child: Column(
         children: [
           Expanded(
             child: ListView.builder(
@@ -271,6 +274,7 @@ class _InteractiveShellPageState extends State<InteractiveShellPage> {
             ),
           ),
         ],
+      ),
       ),
     );
   }

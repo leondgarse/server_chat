@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:dartssh2/dartssh2.dart';
@@ -23,6 +24,7 @@ class _PaneData {
   final int height;
   final int left;
   final int top;
+  final String? currentCommand;
   _PaneData({
     required this.index,
     required this.id,
@@ -31,6 +33,7 @@ class _PaneData {
     required this.height,
     required this.left,
     required this.top,
+    this.currentCommand,
   });
 }
 
@@ -38,11 +41,13 @@ class _WindowData {
   final int index;
   final String name;
   final bool active;
+  final bool zoomed;
   final List<_PaneData> panes;
   _WindowData({
     required this.index,
     required this.name,
     required this.active,
+    required this.zoomed,
     required this.panes,
   });
 }
@@ -94,7 +99,7 @@ class _TmuxTabState extends State<TmuxTab> with AutomaticKeepAliveClientMixin {
       // One-shot query: all sessions + windows + panes
       final output = await state.sshService.executeCommand(
         'tmux list-panes -a -F '
-        '"#{session_name}|||#{session_attached}|||#{window_index}|||#{window_name}|||#{window_active}|||#{pane_index}|||#{pane_id}|||#{pane_active}|||#{pane_width}|||#{pane_height}|||#{pane_left}|||#{pane_top}"'
+        '"#{session_name}|||#{session_attached}|||#{window_index}|||#{window_name}|||#{window_active}|||#{pane_index}|||#{pane_id}|||#{pane_active}|||#{pane_width}|||#{pane_height}|||#{pane_left}|||#{pane_top}|||#{pane_current_command}|||#{window_zoomed_flag}"'
         ' 2>/dev/null || echo "NO_SESSIONS"',
       );
 
@@ -141,6 +146,8 @@ class _TmuxTabState extends State<TmuxTab> with AutomaticKeepAliveClientMixin {
       final paneHeight = int.tryParse(parts[9]) ?? 24;
       final paneLeft = int.tryParse(parts[10]) ?? 0;
       final paneTop = int.tryParse(parts[11]) ?? 0;
+      final paneCurrentCommand = parts.length > 12 ? parts[12] : null;
+      final windowZoomed = parts.length > 13 ? parts[13] == '1' : false;
 
       final winKey = '$sessionName|||$windowIndex';
 
@@ -148,6 +155,7 @@ class _TmuxTabState extends State<TmuxTab> with AutomaticKeepAliveClientMixin {
         'index': windowIndex,
         'name': windowName,
         'active': windowActive,
+        'zoomed': windowZoomed,
         'session': sessionName,
       };
 
@@ -159,6 +167,7 @@ class _TmuxTabState extends State<TmuxTab> with AutomaticKeepAliveClientMixin {
         height: paneHeight,
         left: paneLeft,
         top: paneTop,
+        currentCommand: paneCurrentCommand,
       ));
 
       if (!sessionMap.containsKey(sessionName)) {
@@ -187,6 +196,7 @@ class _TmuxTabState extends State<TmuxTab> with AutomaticKeepAliveClientMixin {
           index: winEntry.value['index'] as int,
           name: winEntry.value['name'] as String,
           active: winEntry.value['active'] as bool,
+          zoomed: winEntry.value['zoomed'] as bool,
           panes: panes,
         ));
       }
@@ -586,11 +596,16 @@ class _WindowTileState extends State<_WindowTile> {
                         color: pane.active ? Colors.green : AppTheme.textSecondary,
                       ),
                       const SizedBox(width: 6),
-                      Text(
-                        'Pane ${pane.index}  ${pane.width}×${pane.height}',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: pane.active ? Colors.green : AppTheme.textSecondary,
+                      Expanded(
+                        child: Text(
+                          pane.currentCommand != null && pane.currentCommand!.isNotEmpty
+                              ? 'Pane ${pane.index}  ${pane.currentCommand}  ${pane.width}×${pane.height}'
+                              : 'Pane ${pane.index}  ${pane.width}×${pane.height}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: pane.active ? Colors.green : AppTheme.textSecondary,
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
                     ],
@@ -736,10 +751,23 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
   double _fontSizeAtPinchStart = 13.0;
   int _lastCols = 80;
   int _lastRows = 25;
+  // Window/pane nav bar data
+  List<_WindowData> _windows = [];
+  int _activeWindowIndex = 0;
+  String? _activePaneId;
+  // ScrollController kept for TerminalView API (actual scrollback is empty in tmux)
+  final ScrollController _scrollController = ScrollController();
+  // Tmux copy-mode scroll state
+  bool _inCopyMode = false;
+  double _dragAccum = 0; // accumulated vertical drag pixels
+  String? _scrollTargetPaneId; // pane under the finger when drag started
+  final GlobalKey _terminalKey = GlobalKey(); // for hit-testing pane at touch pos
 
   @override
   void initState() {
     super.initState();
+    _activeWindowIndex = widget.initialWindowIndex ?? 0;
+    _activePaneId = widget.initialPaneId;
     _terminal = Terminal(maxLines: 10000);
     _terminalController = TerminalController();
     _terminal.onOutput = (data) => _session?.stdin.add(Uint8List.fromList(utf8.encode(data)));
@@ -749,6 +777,133 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
       _session?.resizeTerminal(w, h);
     };
     _startSession();
+  }
+
+  Future<void> _loadWindowPaneData() async {
+    try {
+      final out = await widget.state.sshService.executeCommand(
+        'tmux list-panes -t ${widget.sessionName} -a -F '
+        '"#{window_index}|||#{window_name}|||#{window_active}|||#{pane_index}|||#{pane_id}|||#{pane_active}|||#{pane_width}|||#{pane_height}|||#{pane_left}|||#{pane_top}|||#{pane_current_command}|||#{window_zoomed_flag}"'
+        ' 2>/dev/null',
+      );
+      final Map<int, Map<String, dynamic>> winMeta = {};
+      final Map<int, List<_PaneData>> winPanes = {};
+      for (final line in out.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty)) {
+        final p = line.split('|||');
+        if (p.length < 11) continue;
+        final wi = int.tryParse(p[0]) ?? 0;
+        winMeta.putIfAbsent(wi, () => {'name': p[1], 'active': p[2] == '1', 'zoomed': p.length > 11 ? p[11] == '1' : false});
+        winPanes.putIfAbsent(wi, () => []).add(_PaneData(
+          index: int.tryParse(p[3]) ?? 0,
+          id: p[4],
+          active: p[5] == '1',
+          width: int.tryParse(p[6]) ?? 80,
+          height: int.tryParse(p[7]) ?? 24,
+          left: int.tryParse(p[8]) ?? 0,
+          top: int.tryParse(p[9]) ?? 0,
+          currentCommand: p.length > 10 ? p[10] : null,
+        ));
+      }
+      final windows = winMeta.entries.map((e) => _WindowData(
+        index: e.key,
+        name: e.value['name'] as String,
+        active: e.value['active'] as bool,
+        zoomed: e.value['zoomed'] as bool,
+        panes: winPanes[e.key] ?? [],
+      )).toList()..sort((a, b) => a.index.compareTo(b.index));
+
+      if (!mounted) return;
+      setState(() {
+        _windows = windows;
+        final activeWin = windows.firstWhere((w) => w.active, orElse: () => windows.isNotEmpty ? windows.first : _WindowData(index: 0, name: '', active: false, zoomed: false, panes: []));
+        _activeWindowIndex = activeWin.index;
+        final activePaneInWin = activeWin.panes.firstWhere((p) => p.active, orElse: () => activeWin.panes.isNotEmpty ? activeWin.panes.first : _PaneData(index: 0, id: '', active: false, width: 80, height: 24, left: 0, top: 0));
+        _activePaneId ??= activePaneInWin.id.isNotEmpty ? activePaneInWin.id : null;
+      });
+
+      // If we're NOT in pane-zoom mode and there's a zoomed window, unzoom it
+      if (widget.initialPaneId == null) {
+        final zoomedWindows = windows.where((w) => w.zoomed).toList();
+        if (zoomedWindows.isNotEmpty) {
+          for (final w in zoomedWindows) {
+            widget.state.sshService.executeCommand(
+              'tmux resize-pane -Z -t ${widget.sessionName}:${w.index} 2>/dev/null || true',
+            ).catchError((_) => '');
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  // ---- Tmux copy-mode scroll -----------------------------------------------
+
+  String get _currentTarget =>
+      _scrollTargetPaneId ?? _activePaneId ?? '${widget.sessionName}:$_activeWindowIndex';
+
+  /// Find which pane (from [_windows]) the pixel position [pos] falls in,
+  /// given the terminal widget's pixel [size]. Returns pane id or null.
+  String? _paneIdAtPixel(Offset pos, Size size) {
+    final win = _windows.isEmpty ? null
+        : _windows.firstWhere((w) => w.index == _activeWindowIndex,
+            orElse: () => _windows.first);
+    if (win == null || win.panes.isEmpty) return null;
+    // Total terminal dimensions in cells
+    final totalCols = _lastCols;
+    final totalRows = _lastRows;
+    if (totalCols <= 0 || totalRows <= 0) return null;
+    final cellW = size.width / totalCols;
+    final cellH = size.height / totalRows;
+    final col = pos.dx / cellW;
+    final row = pos.dy / cellH;
+    for (final pane in win.panes) {
+      if (col >= pane.left && col < pane.left + pane.width &&
+          row >= pane.top  && row < pane.top  + pane.height) {
+        return pane.id;
+      }
+    }
+    return null;
+  }
+
+  /// Scroll up/down N lines in tmux copy-mode. Enters copy-mode if needed.
+  /// lines > 0 = scroll-up (finger dragged down), lines < 0 = scroll-down (finger dragged up).
+  void _tmuxScroll(int lines) {
+    if (!widget.state.sshService.isConnected) return;
+    final dir = lines > 0 ? 'scroll-up' : 'scroll-down';
+    final count = lines.abs();
+    final target = _currentTarget;
+    // Always prefix with copy-mode -t to ensure we're in copy-mode before scrolling.
+    // copy-mode is a no-op if already active, so this is safe to repeat.
+    final scrollCmds = "for i in \$(seq $count); do tmux send-keys -X -t '$target' $dir; done";
+    if (!_inCopyMode) setState(() => _inCopyMode = true);
+    widget.state.sshService.executeCommand(
+      "tmux copy-mode -t '$target'; $scrollCmds",
+    ).catchError((e) { debugPrint('[tmux-scroll] error: $e'); return ''; });
+  }
+
+  void _exitCopyMode() {
+    if (!_inCopyMode) return;
+    setState(() => _inCopyMode = false);
+    widget.state.sshService.executeCommand(
+      'tmux send-keys -X -t $_currentTarget cancel 2>/dev/null || true',
+    ).catchError((_) => '');
+  }
+
+  void _switchToWindow(int windowIndex) {
+    _session?.stdin.add(utf8.encode(
+      'tmux select-window -t ${widget.sessionName}:$windowIndex\n',
+    ));
+    setState(() {
+      _activeWindowIndex = windowIndex;
+      _activePaneId = null;
+    });
+    Future.delayed(const Duration(milliseconds: 300), _loadWindowPaneData);
+  }
+
+  void _switchToPane(String paneId) {
+    _session?.stdin.add(utf8.encode(
+      'tmux select-pane -t $paneId\n',
+    ));
+    setState(() => _activePaneId = paneId);
   }
 
   Future<void> _startSession() async {
@@ -782,6 +937,8 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
 
       Future.delayed(const Duration(milliseconds: 800), () async {
         if (!mounted) return;
+        // Load window/pane data for the nav bar
+        _loadWindowPaneData();
         try {
           if (widget.initialPaneId != null) {
             // Zoom the requested pane via separate SSH exec (not PTY stdin).
@@ -808,6 +965,16 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
         setState(() => _exited = true);
       }
     }
+  }
+
+  /// Wraps _sendKey: if in copy-mode, any key exits it first (Escape cancels,
+  /// others exit copy-mode then send the key normally).
+  void _sendKeyWithCopyMode(String key) {
+    if (_inCopyMode) {
+      _exitCopyMode();
+      if (key == 'Escape') return; // Escape just exits copy-mode
+    }
+    _sendKey(key);
   }
 
   void _sendRaw(List<int> bytes) {
@@ -875,8 +1042,167 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _session?.close();
     _terminalController.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
+
+  // ---- Breadcrumb helpers -------------------------------------------------
+
+  Widget _breadcrumbItem(String label, {IconData? icon, bool isSelected = false, VoidCallback? onTap}) {
+    final cs = Theme.of(context).colorScheme;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+        decoration: isSelected
+            ? BoxDecoration(
+                color: cs.onSurface.withValues(alpha: 0.07),
+                borderRadius: BorderRadius.circular(4),
+              )
+            : null,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              Icon(icon, size: 12, color: cs.onSurface.withValues(alpha: 0.6)),
+              const SizedBox(width: 4),
+            ],
+            Text(
+              label.isEmpty ? '…' : label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w400,
+                color: cs.onSurface.withValues(alpha: isSelected ? 0.9 : 0.55),
+              ),
+            ),
+            if (onTap != null) ...[
+              const SizedBox(width: 2),
+              Icon(Icons.arrow_drop_down, size: 14, color: cs.onSurface.withValues(alpha: 0.4)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _breadcrumbSeparator() {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: Text('/', style: TextStyle(fontSize: 11, color: cs.onSurface.withValues(alpha: 0.2))),
+    );
+  }
+
+  void _showWindowSelector() {
+    if (_windows.isEmpty) return;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: true,
+      enableDrag: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) {
+        final cs = Theme.of(ctx).colorScheme;
+        return SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.6),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Row(children: [
+                    Icon(Icons.tab, color: cs.primary),
+                    const SizedBox(width: 8),
+                    Text('Select Window', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: cs.onSurface)),
+                  ]),
+                ),
+                Divider(height: 1, color: cs.outline),
+                Flexible(
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: _windows.length,
+                    itemBuilder: (_, i) {
+                      final win = _windows[i];
+                      final isActive = win.index == _activeWindowIndex;
+                      return ListTile(
+                        leading: Icon(Icons.tab, color: isActive ? cs.primary : cs.onSurface.withValues(alpha: 0.6)),
+                        title: Text('${win.index}: ${win.name}',
+                            style: TextStyle(color: isActive ? cs.primary : cs.onSurface, fontWeight: isActive ? FontWeight.bold : FontWeight.normal)),
+                        subtitle: Text('${win.panes.length} pane${win.panes.length != 1 ? 's' : ''}',
+                            style: TextStyle(color: cs.onSurface.withValues(alpha: 0.38))),
+                        trailing: isActive ? Icon(Icons.check, color: cs.primary) : null,
+                        onTap: () { Navigator.pop(ctx); _switchToWindow(win.index); },
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _showPaneSelector() {
+    final win = _windows.firstWhere((w) => w.index == _activeWindowIndex, orElse: () => _windows.isNotEmpty ? _windows.first : _WindowData(index: 0, name: '', active: false, zoomed: false, panes: []));
+    if (win.panes.isEmpty) return;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: true,
+      enableDrag: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) {
+        final cs = Theme.of(ctx).colorScheme;
+        return SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.7),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Row(children: [
+                    Icon(Icons.terminal, color: cs.primary),
+                    const SizedBox(width: 8),
+                    Text('Select Pane', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: cs.onSurface)),
+                  ]),
+                ),
+                Divider(height: 1, color: cs.outline),
+                Flexible(
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: win.panes.length,
+                    itemBuilder: (_, i) {
+                      final pane = win.panes[i];
+                      final isActive = pane.id == _activePaneId || (_activePaneId == null && pane.active);
+                      final cmd = pane.currentCommand ?? '';
+                      return ListTile(
+                        leading: Icon(Icons.crop_square, size: 18, color: isActive ? Colors.green : cs.onSurface.withValues(alpha: 0.6)),
+                        title: Text(
+                          cmd.isNotEmpty ? '${pane.index}: $cmd' : 'Pane ${pane.index}',
+                          style: TextStyle(color: isActive ? Colors.green : cs.onSurface, fontWeight: isActive ? FontWeight.bold : FontWeight.normal),
+                        ),
+                        subtitle: Text('${pane.width}×${pane.height}', style: TextStyle(color: cs.onSurface.withValues(alpha: 0.38))),
+                        trailing: isActive ? const Icon(Icons.check, color: Colors.green) : null,
+                        onTap: () { Navigator.pop(ctx); _switchToPane(pane.id); },
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // ---- Build --------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
@@ -887,47 +1213,126 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     }
 
-    // Use raw Listener for pinch-to-zoom to bypass the gesture arena
-    // (TerminalView's own gesture recognizers would win otherwise).
+    final activeWin = _windows.isNotEmpty
+        ? _windows.firstWhere((w) => w.index == _activeWindowIndex, orElse: () => _windows.first)
+        : null;
+    _PaneData? activePane;
+    if (activeWin != null) {
+      final panes = activeWin.panes;
+      activePane = panes.firstWhere(
+        (p) => p.id == _activePaneId || (_activePaneId == null && p.active),
+        orElse: () => panes.isNotEmpty ? panes.first : _PaneData(index: 0, id: '', active: false, width: 80, height: 24, left: 0, top: 0),
+      );
+    }
+
+    final bool isPaneZoomed = _windows.any((w) => w.zoomed);
+
+    // Pixels of drag per tmux scroll line. Smaller = faster scrolling.
+    const double pixelsPerLine = 15.0;
+
+    // Single Listener handles pinch-to-zoom, mouse-wheel scroll, AND
+    // single-finger drag scroll. Using Listener (not GestureDetector) means
+    // we never enter the gesture arena, so TerminalView cannot steal touches.
     final terminalWidget = Listener(
+      onPointerSignal: (e) {
+        // Mouse wheel on Linux/desktop → tmux copy-mode scroll.
+        if (e is PointerScrollEvent) {
+          // scrollDelta.dy > 0 = wheel down = scroll-down (negative lines)
+          final lines = -(e.scrollDelta.dy / pixelsPerLine).round();
+          if (lines != 0) _tmuxScroll(lines);
+        }
+      },
       onPointerDown: (e) {
         _pointers[e.pointer] = e.localPosition;
-        if (_pointers.length == 2) {
+        if (_pointers.length == 1) {
+          // Detect which pane was touched for accurate scroll targeting
+          final rb = _terminalKey.currentContext?.findRenderObject() as RenderBox?;
+          if (rb != null) {
+            _scrollTargetPaneId = _paneIdAtPixel(e.localPosition, rb.size);
+          }
+        } else if (_pointers.length == 2) {
+          _dragAccum = 0; // cancel any single-finger accumulation
           final pts = _pointers.values.toList();
           _initialPinchDistance = (pts[0] - pts[1]).distance;
           _fontSizeAtPinchStart = _fontSize;
         }
       },
       onPointerMove: (e) {
+        final prev = _pointers[e.pointer];
         _pointers[e.pointer] = e.localPosition;
         if (_pointers.length == 2 && _initialPinchDistance > 0) {
+          // Two-finger pinch zoom
           final pts = _pointers.values.toList();
           final dist = (pts[0] - pts[1]).distance;
           setState(() {
             _fontSize = (_fontSizeAtPinchStart * dist / _initialPinchDistance).clamp(7.0, 28.0);
           });
+        } else if (_pointers.length == 1 && prev != null) {
+          // Single-finger drag → tmux copy-mode scroll
+          // dy > 0 means finger moved DOWN → content scrolls UP (scroll-up)
+          // dy < 0 means finger moved UP   → content scrolls DOWN (scroll-down)
+          _dragAccum += e.localPosition.dy - prev.dy;
+          final lines = (_dragAccum / pixelsPerLine).truncate();
+          if (lines != 0) {
+            _dragAccum -= lines * pixelsPerLine;
+            _tmuxScroll(lines); // lines>0 = scroll-up, lines<0 = scroll-down
+          }
         }
       },
-      onPointerUp: (e) => _pointers.remove(e.pointer),
-      onPointerCancel: (e) => _pointers.remove(e.pointer),
-      child: Container(
-        color: Colors.black,
-        child: TerminalView(
-          _terminal,
-          controller: _terminalController,
-          padding: EdgeInsets.zero,
-          textStyle: TerminalStyle(fontSize: _fontSize),
+      onPointerUp: (e) {
+        _pointers.remove(e.pointer);
+        if (_pointers.isEmpty) { _dragAccum = 0; _scrollTargetPaneId = null; }
+      },
+      onPointerCancel: (e) {
+        _pointers.remove(e.pointer);
+        if (_pointers.isEmpty) { _dragAccum = 0; _scrollTargetPaneId = null; }
+      },
+        child: Container(
+          key: _terminalKey,
+          color: Colors.black,
+          child: TerminalView(
+            _terminal,
+            controller: _terminalController,
+            scrollController: _scrollController,
+            padding: EdgeInsets.zero,
+            textStyle: TerminalStyle(fontSize: _fontSize),
+          ),
         ),
-      ),
     );
 
     return Scaffold(
       appBar: isLandscape
           ? null
           : AppBar(
-              title: Text(widget.sessionName),
-              backgroundColor: Colors.black87,
-              foregroundColor: Colors.white,
+              title: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(widget.sessionName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                    if (isPaneZoomed && activeWin != null) ...[
+                      _breadcrumbSeparator(),
+                      _breadcrumbItem(
+                        '${activeWin.index}: ${activeWin.name}',
+                        icon: Icons.tab_outlined,
+                        isSelected: false,
+                        onTap: _windows.length > 1 ? _showWindowSelector : null,
+                      ),
+                      if (activePane != null && activeWin.panes.length > 1) ...[
+                        _breadcrumbSeparator(),
+                        _breadcrumbItem(
+                          activePane.currentCommand?.isNotEmpty == true
+                              ? '${activePane.index}: ${activePane.currentCommand}'
+                              : 'Pane ${activePane.index}',
+                          icon: Icons.terminal,
+                          isSelected: false,
+                          onTap: _showPaneSelector,
+                        ),
+                      ],
+                    ],
+                  ],
+                ),
+              ),
               actions: [
                 IconButton(
                   icon: const Icon(Icons.remove),
@@ -948,6 +1353,30 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
             child: Stack(
               children: [
                 terminalWidget,
+                // Copy-mode badge — tap to exit
+                if (_inCopyMode)
+                  Positioned(
+                    top: 8,
+                    right: 8,
+                    child: GestureDetector(
+                      onTap: _exitCopyMode,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.withValues(alpha: 0.85),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.unfold_more, size: 12, color: Colors.white),
+                            SizedBox(width: 4),
+                            Text('SCROLL  ✕', style: TextStyle(fontSize: 11, color: Colors.white, fontWeight: FontWeight.w700)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 if (_exited)
                   Container(
                     color: Colors.black54,
@@ -957,11 +1386,7 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
                       children: [
                         const Text(
                           'Session ended',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.w600,
-                          ),
+                          style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
                         ),
                         const SizedBox(height: 16),
                         ElevatedButton(
@@ -974,7 +1399,7 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
               ],
             ),
           ),
-          SpecialKeysBar(onKey: _sendKey),
+          SpecialKeysBar(onKey: _sendKeyWithCopyMode),
         ],
       ),
     );

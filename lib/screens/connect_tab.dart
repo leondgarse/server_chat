@@ -205,7 +205,35 @@ class _ConnectTabState extends State<ConnectTab> {
     if (state.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Connected!')));
+      _showBatteryReminderOnce(context);
     }
+  }
+
+  Future<void> _showBatteryReminderOnce(BuildContext context) async {
+    if (!Platform.isAndroid) return;
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool('battery_reminder_shown') == true) return;
+    await prefs.setBool('battery_reminder_shown', true);
+    if (!context.mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Allow Background Activity'),
+        content: const Text(
+          'To prevent SSH sessions from being killed in the background:\n\n'
+          '1. Open Settings → Apps → TermiConnect → Battery\n'
+          '2. Set to "Unrestricted" or "Allow all background activity"\n\n'
+          'Some devices have a separate Battery Management screen — find TermiConnect there and allow all background activity.\n\n'
+          'This is required for stable long-running sessions.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Got it'),
+          ),
+        ],
+      ),
+    );
   }
 
   // ─── UI ────────────────────────────────────────────────────────────────────

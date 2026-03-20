@@ -7,6 +7,10 @@ import '../utils/theme.dart';
 ///   - bare names: 'Escape', 'Tab', 'Enter', 'Up', 'Down', 'Left', 'Right',
 ///                 'Home', 'End', 'Delete'
 ///   - modifier-prefixed: e.g. 'C-a', 'S-Up', 'CA-b'  (C=Ctrl, S=Shift, A=Alt)
+///
+/// When a modifier is active, a hidden TextField captures the next system-
+/// keyboard character and sends it with the modifier applied — no separate
+/// letter row needed.
 class SpecialKeysBar extends StatefulWidget {
   final void Function(String key) onKey;
 
@@ -20,6 +24,17 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
   bool _ctrlOn  = false;
   bool _shiftOn = false;
   bool _altOn   = false;
+
+  // Used to capture the next character typed on the soft keyboard
+  final FocusNode _captureFocus = FocusNode();
+  final TextEditingController _captureCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _captureFocus.dispose();
+    _captureCtrl.dispose();
+    super.dispose();
+  }
 
   String get _activeModifier {
     final buf = StringBuffer();
@@ -48,62 +63,47 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
     }
   }
 
+  /// Called when the hidden capture field receives text from the soft keyboard.
+  void _onCaptureChanged(String value) {
+    if (value.isEmpty) return;
+    // Take the last character typed (TextField may accumulate)
+    final ch = value.characters.last.toLowerCase();
+    _captureCtrl.clear();
+    final mod = _activeModifier;
+    _clearModifiers();
+    HapticFeedback.lightImpact();
+    widget.onKey(mod.isNotEmpty ? '$mod-$ch' : ch);
+  }
+
+  /// Toggle a modifier. When any modifier becomes active, focus the hidden
+  /// capture field so the soft keyboard delivers input there.
+  void _toggleModifier(void Function() toggle) {
+    setState(toggle);
+    final anyMod = _ctrlOn || _shiftOn || _altOn;
+    if (anyMod) {
+      _captureCtrl.clear();
+      _captureFocus.requestFocus();
+    } else {
+      _captureFocus.unfocus();
+    }
+  }
+
   Widget _modBtn(String label, bool active, VoidCallback onTap) =>
       _ModBtn(label: label, active: active, onTap: onTap);
-
-  Widget _letterRow(bool isDark) {
-    const letters = 'abcdefghijklmnopqrstuvwxyz';
-    final bg = isDark ? Colors.grey.shade800 : Colors.grey.shade300;
-    final fg = isDark ? Colors.white70 : Colors.black87;
-    final border = isDark ? Colors.black : Colors.grey.shade400;
-    return SizedBox(
-      height: 34,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 4),
-        itemCount: letters.length,
-        itemBuilder: (_, i) {
-          final ch = letters[i];
-          return GestureDetector(
-            onTap: () {
-              HapticFeedback.lightImpact();
-              final mod = _activeModifier;
-              _clearModifiers();
-              widget.onKey(mod.isNotEmpty ? '$mod-$ch' : ch);
-            },
-            child: Container(
-              width: 30,
-              margin: const EdgeInsets.symmetric(horizontal: 2),
-              decoration: BoxDecoration(
-                color: bg,
-                borderRadius: BorderRadius.circular(5),
-                border: Border(bottom: BorderSide(color: border, width: 2)),
-              ),
-              alignment: Alignment.center,
-              child: Text(ch,
-                  style: TextStyle(
-                      fontSize: 11, fontWeight: FontWeight.w700, color: fg)),
-            ),
-          );
-        },
-      ),
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final isLandscape =
         MediaQuery.of(context).orientation == Orientation.landscape;
-    final anyMod = _ctrlOn || _shiftOn || _altOn;
 
-    final barBg   = isDark ? Colors.grey.shade900 : Colors.grey.shade200;
+    final barBg     = isDark ? Colors.grey.shade900 : Colors.grey.shade200;
     final topBorder = isDark ? Colors.black : Colors.grey.shade400;
 
     final modifiers = [
-      _modBtn('CTRL',  _ctrlOn,  () => setState(() => _ctrlOn  = !_ctrlOn)),
-      _modBtn('SHIFT', _shiftOn, () => setState(() => _shiftOn = !_shiftOn)),
-      _modBtn('ALT',   _altOn,   () => setState(() => _altOn   = !_altOn)),
+      _modBtn('CTRL',  _ctrlOn,  () => _toggleModifier(() => _ctrlOn  = !_ctrlOn)),
+      _modBtn('SHIFT', _shiftOn, () => _toggleModifier(() => _shiftOn = !_shiftOn)),
+      _modBtn('ALT',   _altOn,   () => _toggleModifier(() => _altOn   = !_altOn)),
     ];
     final specials = [
       _KeyBtn(label: 'ESC',  onTap: () => _tapDirect('Escape')),
@@ -127,6 +127,31 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
       ),
     );
 
+    // Invisible 1px TextField that captures the next soft-keyboard character
+    // when a modifier is active. Must have non-zero size to receive focus on
+    // Android. keyboardType.visiblePassword suppresses autocorrect/suggestions
+    // while keeping the normal (non-secure) keyboard layout.
+    final captureField = SizedBox(
+      height: 1,
+      width: double.infinity,
+      child: Opacity(
+        opacity: 0,
+        child: TextField(
+          focusNode: _captureFocus,
+          controller: _captureCtrl,
+          onChanged: _onCaptureChanged,
+          autocorrect: false,
+          enableSuggestions: false,
+          keyboardType: TextInputType.visiblePassword,
+          style: const TextStyle(fontSize: 1),
+          decoration: const InputDecoration(
+            border: InputBorder.none,
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+      ),
+    );
+
     return Container(
       decoration: BoxDecoration(
         color: barBg,
@@ -137,6 +162,7 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            captureField,
             if (isLandscape) ...[
               Padding(
                 padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
@@ -160,11 +186,6 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
                 child: Row(children: [...arrows, const SizedBox(width: 8), retBtn]),
               ),
             ],
-            if (anyMod)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(0, 0, 0, 4),
-                child: _letterRow(isDark),
-              ),
           ],
         ),
       ),

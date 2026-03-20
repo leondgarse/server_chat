@@ -25,6 +25,7 @@ class _RemotePathPickerDialogState extends State<RemotePathPickerDialog> {
   List<String> _items = [];
   bool _isLoading = false;
   String? _error;
+  bool _showHidden = false;
 
   @override
   void initState() {
@@ -45,13 +46,14 @@ class _RemotePathPickerDialogState extends State<RemotePathPickerDialog> {
     try {
       final state = Provider.of<AppState>(context, listen: false);
       // Use resolved absolute path (no tilde)
-      String cmd = widget.foldersOnly 
-          ? 'ls -d "$_currentPath"/*/ 2>/dev/null || echo ""'
-          : 'ls -p "$_currentPath" 2>/dev/null || echo ""';
+      final hiddenFlag = _showHidden ? ' -a' : '';
+      String cmd = widget.foldersOnly
+          ? 'ls -d$hiddenFlag "$_currentPath"/*/ 2>/dev/null || echo ""'
+          : 'ls -p$hiddenFlag "$_currentPath" 2>/dev/null || echo ""';
           
       final output = await state.sshService.executeCommand(cmd);
       
-      final lines = output.trim().split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+      final lines = output.trim().split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty && e != '.' && e != '..').toList();
       
       // For foldersOnly with full paths, extract just the basename
       List<String> displayItems;
@@ -123,6 +125,17 @@ class _RemotePathPickerDialogState extends State<RemotePathPickerDialog> {
                     style: const TextStyle(fontWeight: FontWeight.bold),
                     overflow: TextOverflow.ellipsis,
                   ),
+                ),
+                IconButton(
+                  icon: Icon(
+                    _showHidden ? Icons.visibility : Icons.visibility_off,
+                    color: _showHidden ? Theme.of(context).colorScheme.primary : null,
+                  ),
+                  onPressed: () {
+                    setState(() => _showHidden = !_showHidden);
+                    _loadDirectory();
+                  },
+                  tooltip: _showHidden ? 'Hide hidden files' : 'Show hidden files',
                 ),
                 if (widget.foldersOnly || widget.showSelectDir)
                   ElevatedButton(

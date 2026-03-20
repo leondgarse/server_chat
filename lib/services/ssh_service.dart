@@ -242,15 +242,16 @@ class SSHService {
     if (!isConnected) throw Exception('Not connected to SSH server');
     // Use bash -l (login, no -i) so .bash_profile is sourced for PATH without
     // the interactive mode that prints PS1 prompts and echoes commands to stdout.
-    final session = await _client!.execute('bash -l -s');
-    // Extract the full interactive-shell PATH (conda, virtualenv, etc.) and
-    // export it so subprocesses launched by the command (e.g. claude → python3)
-    // see the correct PATH even though this session has no TTY.
-    // Also enable alias expansion and source .bashrc so user-defined aliases
-    // and shell functions (e.g. custom claude wrappers) are available.
+    // Use bash -i (interactive) so .bashrc is sourced automatically including
+    // alias/function definitions. Without -i, bash skips .bashrc because of the
+    // "case $- in *i*)" guard present in most distributions.
+    // The "no job control" / "cannot set terminal" messages that -i emits on a
+    // non-TTY are already filtered in the caller's stderr listener.
+    final session = await _client!.execute('bash -i -l -s');
+    // Export the resolved PATH so subprocesses (e.g. claude → python3) find
+    // conda/virtualenv binaries even though this session has no TTY.
     const pathFix =
         r'shopt -s expand_aliases; '
-        r'[ -f ~/.bashrc ] && source ~/.bashrc >/dev/null 2>&1; '
         r'_P="$(bash -l -i -c "echo \$PATH" 2>/dev/null)"; [ -n "$_P" ] && export PATH="$_P"; unset _P';
     session.stdin.add(utf8.encode('$pathFix\n$command\n'));
     await session.stdin.close();
@@ -341,8 +342,19 @@ class SSHService {
     final sftp = await _client!.sftp();
     try {
       final stat = await sftp.stat(remotePath);
-      // S_IFDIR = 0x4000; file type occupies bits 12–15 of permissions.
-      return ((stat.permissions ?? 0) & 0xF000) == 0x4000;
+      return stat.isDirectory;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Check whether a remote path exists as a file (via SFTP stat).
+  Future<bool> isRemoteFile(String remotePath) async {
+    if (!isConnected) throw Exception('Not connected to SSH server');
+    final sftp = await _client!.sftp();
+    try {
+      final stat = await sftp.stat(remotePath);
+      return !stat.isDirectory;
     } catch (_) {
       return false;
     }
@@ -352,14 +364,18 @@ class SSHService {
   Future<List<SftpName>> sftpListDir(String remotePath) async {
     if (!isConnected) throw Exception('Not connected to SSH server');
     final sftp = await _client!.sftp();
-    return sftp.readdir(remotePath);
+    final items = <SftpName>[];
+    await for (final batch in sftp.readdir(remotePath)) {
+      items.addAll(batch);
+    }
+    return items;
   }
 
   /// Upload a local directory recursively to [remoteBasePath] via SFTP.
   Future<void> uploadDirectory(
     String localDirPath,
     String remoteBasePath, {
-    void Function(String file)? onProgress,
+    void Function(String file, double progress)? onProgress,
   }) async {
     if (!isConnected) throw Exception('Not connected to SSH server');
     final sftp = await _client!.sftp();
@@ -367,14 +383,18 @@ class SSHService {
     Future<void> doUpload(String localPath, String remotePath) async {
       try { await sftp.mkdir(remotePath); } catch (_) {}
       final dir = Directory(localPath);
-      await for (final entity in dir.list()) {
+      for (final entity in dir.listSync()) {
         final name = entity.path.split('/').last;
         final childRemote = '$remotePath/$name';
         if (entity is Directory) {
           await doUpload(entity.path, childRemote);
         } else if (entity is File) {
-          onProgress?.call(entity.path);
-          await uploadFile(entity.path, childRemote);
+          onProgress?.call(entity.path, 0);
+          await uploadFile(entity.path, childRemote, onProgress: (received, total) {
+            if (total > 0) {
+              onProgress?.call(entity.path, received / total);
+            }
+          });
         }
       }
     }
@@ -398,7 +418,7 @@ class SSHService {
         if (item.filename == '.' || item.filename == '..') continue;
         final childRemote = '$remotePath/${item.filename}';
         final childLocal = '$localPath/${item.filename}';
-        final isDir = ((item.attr.permissions ?? 0) & 0xF000) == 0x4000;
+        final isDir = item.attr.isDirectory;
         if (isDir) {
           await doDownload(childRemote, childLocal);
         } else {

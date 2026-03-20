@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/app_state.dart';
 import '../models/chat_message.dart';
+import '../utils/text_truncator.dart';
 import '../utils/theme.dart';
 import '../widgets/connection_button.dart';
 import '../widgets/theme_switch_button.dart';
@@ -254,7 +255,10 @@ class _TerminalTabState extends State<TerminalTab> with AutomaticKeepAliveClient
           const ConnectionButton(),
         ],
       ),
-      body: Column(
+      body: GestureDetector(
+        onTap: () => FocusScope.of(context).unfocus(),
+        behavior: HitTestBehavior.translucent,
+        child: Column(
         children: [
           Expanded(
             child: ListView.builder(
@@ -280,16 +284,34 @@ class _TerminalTabState extends State<TerminalTab> with AutomaticKeepAliveClient
             child: Row(
               children: [
                 Expanded(
-                  child: TextField(
-                    controller: _cmdController,
-                    onSubmitted: (_) => _executeCommand(),
-                    decoration: InputDecoration(
-                      hintText: '$displayDir \$',
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(24),
-                      ),
-                    ),
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final style = Theme.of(context).textTheme.bodyMedium!.copyWith(fontSize: 14);
+                      final hint = truncateLeft(
+                        '$displayDir \$',
+                        constraints.maxWidth - 32,
+                        style,
+                      );
+                      return TextField(
+                        controller: _cmdController,
+                        textAlign: TextAlign.left,
+                        textAlignVertical: TextAlignVertical.top,
+                        onSubmitted: (_) => _executeCommand(),
+                        style: style,
+                        decoration: InputDecoration(
+                          hint: Text(
+                            hint,
+                            maxLines: 1,
+                            overflow: TextOverflow.clip,
+                            style: style.copyWith(color: Theme.of(context).hintColor),
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(24),
+                          ),
+                        ),
+                      );
+                    },
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -316,6 +338,7 @@ class _TerminalTabState extends State<TerminalTab> with AutomaticKeepAliveClient
             ),
           ),
         ],
+      ),
       ),
     );
   }
