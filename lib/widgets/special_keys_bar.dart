@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../utils/theme.dart';
@@ -11,19 +12,29 @@ import '../utils/theme.dart';
 /// When a modifier is active, a hidden TextField captures the next system-
 /// keyboard character and sends it with the modifier applied — no separate
 /// letter row needed.
+///
+/// [prefix] — if non-null, a PREFIX button is shown first that sends this key
+/// (e.g. 'C-b' or 'C-s'). [onPrefixChanged] is called when user edits it.
 class SpecialKeysBar extends StatefulWidget {
   final void Function(String key) onKey;
+  final String? prefix;
+  final void Function(String newPrefix)? onPrefixChanged;
 
-  const SpecialKeysBar({super.key, required this.onKey});
+  const SpecialKeysBar({
+    super.key,
+    required this.onKey,
+    this.prefix,
+    this.onPrefixChanged,
+  });
 
   @override
   State<SpecialKeysBar> createState() => _SpecialKeysBarState();
 }
 
 class _SpecialKeysBarState extends State<SpecialKeysBar> {
-  bool _ctrlOn  = false;
-  bool _shiftOn = false;
-  bool _altOn   = false;
+  bool _ctrlOn      = false;
+  bool _shiftOn     = false;
+  bool _altOn       = false;
 
   // Used to capture the next character typed on the soft keyboard
   final FocusNode _captureFocus = FocusNode();
@@ -47,6 +58,34 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
   void _clearModifiers() =>
       setState(() { _ctrlOn = false; _shiftOn = false; _altOn = false; });
 
+  Future<void> _showPrefixEditor(BuildContext context) async {
+    final ctrl = TextEditingController(text: widget.prefix);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Tmux Prefix Key'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'e.g. C-b or C-s',
+            helperText: 'C=Ctrl, S=Shift, A=Alt',
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (result != null && result.isNotEmpty) {
+      widget.onPrefixChanged!(result);
+    }
+  }
+
   void _tapDirect(String key) {
     HapticFeedback.lightImpact();
     widget.onKey(key);
@@ -66,13 +105,13 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
   /// Called when the hidden capture field receives text from the soft keyboard.
   void _onCaptureChanged(String value) {
     if (value.isEmpty) return;
-    // Take the last character typed (TextField may accumulate)
     final ch = value.characters.last.toLowerCase();
     _captureCtrl.clear();
     final mod = _activeModifier;
     _clearModifiers();
     HapticFeedback.lightImpact();
-    widget.onKey(mod.isNotEmpty ? '$mod-$ch' : ch);
+    final key = mod.isNotEmpty ? '$mod-$ch' : ch;
+    widget.onKey(key);
   }
 
   /// Toggle a modifier. When any modifier becomes active, focus the hidden
@@ -99,6 +138,21 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
 
     final barBg     = isDark ? Colors.grey.shade900 : Colors.grey.shade200;
     final topBorder = isDark ? Colors.black : Colors.grey.shade400;
+
+    final prefixBtn = widget.prefix != null
+        ? Expanded(
+            child: _PrefixBtn(
+              prefix: widget.prefix!,
+              onTap: () {
+                HapticFeedback.lightImpact();
+                widget.onKey(widget.prefix!);
+              },
+              onLongPress: widget.onPrefixChanged != null
+                  ? () => _showPrefixEditor(context)
+                  : null,
+            ),
+          )
+        : null;
 
     final modifiers = [
       _modBtn('CTRL',  _ctrlOn,  () => _toggleModifier(() => _ctrlOn  = !_ctrlOn)),
@@ -168,6 +222,7 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
                 padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
                 child: Row(
                   children: [
+                    if (prefixBtn != null) prefixBtn,
                     ...modifiers,
                     ...specials,
                     ...arrows,
@@ -179,7 +234,11 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
             ] else ...[
               Padding(
                 padding: const EdgeInsets.fromLTRB(4, 4, 4, 2),
-                child: Row(children: [...modifiers, ...specials]),
+                child: Row(children: [
+                  if (prefixBtn != null) prefixBtn,
+                  ...modifiers,
+                  ...specials,
+                ]),
               ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(4, 2, 4, 4),
@@ -305,11 +364,94 @@ class _ModBtn extends StatelessWidget {
   }
 }
 
-class _ArrowBtn extends StatelessWidget {
+class _PrefixBtn extends StatelessWidget {
+  final String prefix;
+  final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+
+  const _PrefixBtn({
+    required this.prefix,
+    required this.onTap,
+    this.onLongPress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    const accent = AppTheme.primaryBlue;
+    final bg = isDark ? Colors.grey.shade800 : Colors.grey.shade300;
+    final border = isDark ? Colors.black : Colors.grey.shade400;
+
+    return GestureDetector(
+      onTap: onTap,
+      onLongPress: onLongPress,
+      child: Container(
+        height: 34,
+        margin: const EdgeInsets.symmetric(horizontal: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(5),
+          border: Border(
+            bottom: BorderSide(color: border, width: 2),
+          ),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              'PREFIX',
+              style: TextStyle(
+                fontSize: 7,
+                fontWeight: FontWeight.w700,
+                color: isDark ? Colors.white38 : Colors.black38,
+              ),
+            ),
+            Text(
+              prefix,
+              style: const TextStyle(
+                fontSize: 9,
+                fontWeight: FontWeight.w700,
+                color: accent,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ArrowBtn extends StatefulWidget {
   final IconData icon;
   final VoidCallback onTap;
 
   const _ArrowBtn({required this.icon, required this.onTap});
+
+  @override
+  State<_ArrowBtn> createState() => _ArrowBtnState();
+}
+
+class _ArrowBtnState extends State<_ArrowBtn> {
+  Timer? _repeatTimer;
+
+  void _startRepeat() {
+    widget.onTap(); // immediate first fire
+    _repeatTimer = Timer.periodic(const Duration(milliseconds: 80), (_) {
+      widget.onTap();
+    });
+  }
+
+  void _stopRepeat() {
+    _repeatTimer?.cancel();
+    _repeatTimer = null;
+  }
+
+  @override
+  void dispose() {
+    _repeatTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -319,7 +461,10 @@ class _ArrowBtn extends StatelessWidget {
     final border = isDark ? Colors.black : Colors.grey.shade400;
 
     return GestureDetector(
-      onTap: onTap,
+      onTap: widget.onTap,
+      onLongPressStart: (_) => _startRepeat(),
+      onLongPressEnd: (_) => _stopRepeat(),
+      onLongPressCancel: _stopRepeat,
       child: Container(
         width: 44,
         height: 34,
@@ -329,7 +474,7 @@ class _ArrowBtn extends StatelessWidget {
           borderRadius: BorderRadius.circular(5),
           border: Border(bottom: BorderSide(color: border, width: 2)),
         ),
-        child: Icon(icon, size: 18, color: fg),
+        child: Icon(widget.icon, size: 18, color: fg),
       ),
     );
   }

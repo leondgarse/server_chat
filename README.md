@@ -8,9 +8,16 @@ A Flutter SSH client for Android/Linux with a chat-style UX for Claude Code sess
 - Chat-style terminal: type a command, get the output as a reply bubble
 - Command history (↑/↓ in AppBar)
 - Stop button cancels a running command mid-execution
-- Interactive commands (`vim`, `python`, `claude`, etc.) open in a full-screen PTY page
-- PTY button opens a full `bash` PTY with special-keys bar
+- Interactive commands (`vim`, `python`, `ipython`, `claude`, etc.) push a full-screen PTY page (isolated per command)
 - `cd` tracks working directory; shared live with Files and Claude tabs
+
+### PTY Tab
+- Persistent full-screen `bash` shell using xterm terminal emulator
+- Survives tab switches (keeps state via `AutomaticKeepAliveClientMixin`)
+- Auto-starts on connect, auto-cd to the current working directory
+- **Command suggestions**: as you type, matching commands from `~/.bash_history` appear as tappable chips above the key bar — tap to complete
+- Special-keys bar for modifier combos and arrow keys
+- Reconnect button when the shell session exits
 
 ### Files Tab
 - Load a remote file over SSH → edit in a text field → save back
@@ -27,12 +34,16 @@ A Flutter SSH client for Android/Linux with a chat-style UX for Claude Code sess
 
 ### Tmux Tab
 - Lists all tmux sessions, windows, and panes in a tree view
-- Pane layout overview: a scaled diagram showing exact pane positions — tap any pane to jump directly to it
+- Pane layout overview: a scaled diagram showing exact pane positions — tap any pane to jump directly to it (zooms in on that pane)
 - Attach to any session/window/pane in a full-screen xterm terminal
 - Mouse support (`tmux set -g mouse on` is sent on attach)
 - Pinch-to-zoom and ±1pt font buttons (7–28pt range)
 - Landscape mode: fullscreen immersive, single-row key bar
-- Special-keys bar with CTRL/SHIFT/ALT modifier stacking, a–z letter row, arrows, ESC, TAB, HOME, END, DEL, RET
+- Special-keys bar with CTRL/SHIFT/ALT modifier stacking, arrows, ESC, TAB, HOME, END, DEL, RET
+- Configurable PREFIX key button: tap sends the prefix immediately; long-press to edit (e.g. `C-b` or `C-s`) — persisted in SharedPreferences
+- Drag or mouse-wheel to scroll: enters tmux copy-mode via SSH; exits automatically at the bottom or on any non-arrow key
+- Arrow keys Up/Down while in copy-mode continue scrolling; any other key exits copy-mode first
+- Long-press arrow keys for continuous repeat (80ms interval)
 
 ### Connect Tab
 - SSH connection form: host, port, username, password, private key (paste)
@@ -44,25 +55,28 @@ A Flutter SSH client for Android/Linux with a chat-style UX for Claude Code sess
 ### Theme
 - Light, Dark, and System (auto) themes
 - Toggle with the sun/moon icon in the AppBar of any tab — change takes effect instantly and is persisted
+- xterm terminal views (PTY, Tmux, Shell PTY) use a matching light theme when in light mode
 
 ## Shared Current Directory
 
-All three editing/execution tabs share a single working-directory state (`AppState.currentPath`):
+All editing/execution tabs share a single working-directory state (`AppState.currentPath`):
 - **Shell** — updated on every `cd` command
 - **Files** — path field follows Shell's directory automatically (unless a file is already open)
 - **Claude** — uses the current path as the project directory for every prompt (auto-updates when idle)
 
 ## Special Keys Bar
 
-Available in both the **Tmux** full-screen terminal and the **Shell PTY** page:
+Available in the **PTY** tab, **Tmux** full-screen terminal, and **Shell PTY** page:
 
-| Row | Keys |
-|-----|------|
-| Row 1 | CTRL · SHIFT · ALT · ESC · TAB · HOME · END · DEL |
+| Row (portrait) | Keys |
+|---|---|
+| Row 1 | PREFIX (tmux only) · CTRL · SHIFT · ALT · ESC · TAB · HOME · END · DEL |
 | Row 2 | ← ↑ ↓ → · RET |
-| (modifier active) | Scrollable a–z letter row for modifier+key combos |
 
-Modifier keys stack independently; tapping a letter or arrow while a modifier is active sends the correct xterm escape sequence and clears the modifier.
+- Modifier keys (CTRL/SHIFT/ALT) stack independently; tapping a letter or arrow while a modifier is active sends the correct xterm escape sequence and clears the modifier
+- Long-press any arrow key for continuous repeat
+- Landscape: all keys on a single row
+- PREFIX button (Tmux only): one-shot — tap to send the configured prefix key immediately; long-press to change it
 
 ## Project Layout
 
@@ -70,16 +84,17 @@ Modifier keys stack independently; tapping a letter or arrow while a modifier is
 lib/
 ├── main.dart
 ├── models/
-│   ├── app_state.dart               # ChangeNotifier: SSH, theme, current path
+│   ├── app_state.dart               # ChangeNotifier: SSH, theme, current path, auto-reconnect
 │   └── chat_message.dart
 ├── screens/
-│   ├── home_screen.dart             # Bottom nav + auto-connect on startup
+│   ├── home_screen.dart             # Bottom nav (Shell/Files/PTY/Claude/Tmux) + auto-connect
 │   ├── connect_tab.dart             # SSH form, profiles, local tunnels
 │   ├── terminal_tab.dart            # Chat-style shell
+│   ├── pty_tab.dart                 # Persistent PTY shell tab
 │   ├── tmux_tab.dart                # Tmux tree view + full xterm session
 │   ├── claude_tab.dart              # Claude Code chat
 │   ├── file_edit_tab.dart           # Remote file editor
-│   └── interactive_shell_page.dart  # Full-screen PTY for interactive commands
+│   └── interactive_shell_page.dart  # Full-screen PTY pushed for interactive shell commands
 ├── services/
 │   └── ssh_service.dart             # dartssh2 wrapper (exec, shell, SFTP, keepalive, tunnels)
 ├── utils/
@@ -87,7 +102,7 @@ lib/
 └── widgets/
     ├── connection_button.dart        # AppBar SSH status icon
     ├── theme_switch_button.dart      # AppBar light/dark/auto toggle
-    ├── special_keys_bar.dart         # Shared PTY key bar (tmux + shell PTY)
+    ├── special_keys_bar.dart         # Shared PTY key bar (PTY, Tmux, Shell PTY)
     └── remote_path_picker.dart       # SFTP file/folder browser dialog
 ```
 
@@ -96,9 +111,9 @@ lib/
 | Package | Purpose |
 |---|---|
 | `dartssh2` | SSH client — exec, interactive shell, SFTP, local port forwarding |
-| `xterm` (Termius fork) | Terminal emulator widget (PTY rendering) |
+| `xterm` (Termius fork) | Terminal emulator widget (PTY rendering, alt-buffer, light/dark themes) |
 | `provider` | State management |
-| `shared_preferences` | Persist SSH profiles and theme preference |
+| `shared_preferences` | Persist SSH profiles, theme, tmux prefix key |
 | `path_provider` | Local file paths |
 | `google_fonts` | Space Grotesk font |
 | `wakelock_plus` | Keep screen on during sessions |
@@ -134,3 +149,4 @@ Defined in `DESIGN.md`. Summary:
 - Large file edits load the entire file into memory
 - No SSH host key verification (trusts all hosts)
 - Local port tunnel `remoteHost` is always `localhost` on the remote side (sufficient for most use cases)
+- Tmux pane copy-mode scroll: at the bottom (`[0/...]`), press `q` via the soft keyboard or ESC key to exit copy-mode manually

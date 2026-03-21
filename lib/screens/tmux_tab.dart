@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:math' as math;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
@@ -12,6 +13,32 @@ import '../widgets/connection_button.dart';
 import '../widgets/special_keys_bar.dart';
 import '../widgets/theme_switch_button.dart';
 import 'connect_tab.dart';
+
+const _lightTerminalTheme = TerminalTheme(
+  cursor: Color(0xFF0d33f2),
+  selection: Color(0x440d33f2),
+  foreground: Color(0xFF101322),
+  background: Color(0xFFf5f6f8),
+  black: Color(0xFF101322),
+  red: Color(0xFFCD3131),
+  green: Color(0xFF0A8754),
+  yellow: Color(0xFF866B00),
+  blue: Color(0xFF0d33f2),
+  magenta: Color(0xFFBC3FBC),
+  cyan: Color(0xFF008B8B),
+  white: Color(0xFF6E7681),
+  brightBlack: Color(0xFF555F6E),
+  brightRed: Color(0xFFCD3131),
+  brightGreen: Color(0xFF0A8754),
+  brightYellow: Color(0xFFB8860B),
+  brightBlue: Color(0xFF2472C8),
+  brightMagenta: Color(0xFFD670D6),
+  brightCyan: Color(0xFF11A8CD),
+  brightWhite: Color(0xFF101322),
+  searchHitBackground: Color(0xFFFFFF2B),
+  searchHitBackgroundCurrent: Color(0xFF31FF26),
+  searchHitForeground: Color(0xFF000000),
+);
 
 // ---------------------------------------------------------------------------
 // Data models for session tree
@@ -755,11 +782,12 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
   List<_WindowData> _windows = [];
   int _activeWindowIndex = 0;
   String? _activePaneId;
-  // ScrollController kept for TerminalView API (actual scrollback is empty in tmux)
-  final ScrollController _scrollController = ScrollController();
+  // Tmux prefix key (e.g. 'C-b' or 'C-s'), loaded from SharedPreferences.
+  String _tmuxPrefix = 'C-b';
   // Tmux copy-mode scroll state
   bool _inCopyMode = false;
   double _dragAccum = 0; // accumulated vertical drag pixels
+  bool _dragActive = false; // true once drag threshold crossed (survives rebuilds)
   String? _scrollTargetPaneId; // pane under the finger when drag started
   final GlobalKey _terminalKey = GlobalKey(); // for hit-testing pane at touch pos
 
@@ -777,6 +805,18 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
       _session?.resizeTerminal(w, h);
     };
     _startSession();
+    SharedPreferences.getInstance().then((prefs) {
+      final saved = prefs.getString('tmux_prefix');
+      if (saved != null && saved.isNotEmpty && mounted) {
+        setState(() => _tmuxPrefix = saved);
+      }
+    });
+  }
+
+  Future<void> _saveTmuxPrefix(String prefix) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('tmux_prefix', prefix);
+    if (mounted) setState(() => _tmuxPrefix = prefix);
   }
 
   Future<void> _loadWindowPaneData() async {
@@ -837,8 +877,18 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
 
   // ---- Tmux copy-mode scroll -----------------------------------------------
 
-  String get _currentTarget =>
-      _scrollTargetPaneId ?? _activePaneId ?? '${widget.sessionName}:$_activeWindowIndex';
+  String get _currentTarget {
+    if (_scrollTargetPaneId != null) return _scrollTargetPaneId!;
+    if (_activePaneId != null) return _activePaneId!;
+    // Try to derive active pane id from loaded window data before falling back.
+    final win = _windows.isEmpty ? null
+        : _windows.firstWhere((w) => w.index == _activeWindowIndex,
+            orElse: () => _windows.first);
+    final pane = win?.panes.firstWhere((p) => p.active,
+        orElse: () => win.panes.isNotEmpty ? win.panes.first : _PaneData(index: 0, id: '', active: false, width: 80, height: 24, left: 0, top: 0));
+    if (pane != null && pane.id.isNotEmpty) return pane.id;
+    return '${widget.sessionName}:$_activeWindowIndex';
+  }
 
   /// Find which pane (from [_windows]) the pixel position [pos] falls in,
   /// given the terminal widget's pixel [size]. Returns pane id or null.
@@ -847,51 +897,82 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
         : _windows.firstWhere((w) => w.index == _activeWindowIndex,
             orElse: () => _windows.first);
     if (win == null || win.panes.isEmpty) return null;
-    // Total terminal dimensions in cells
-    final totalCols = _lastCols;
-    final totalRows = _lastRows;
+    if (win.panes.length == 1) return win.panes.first.id;
+    // Derive total terminal grid from the union of pane extents, not _lastCols/Rows,
+    // so cell size is accurate even before the first resize event fires.
+    int totalCols = 0, totalRows = 0;
+    for (final p in win.panes) {
+      final r = p.left + p.width;
+      final b = p.top + p.height;
+      if (r > totalCols) totalCols = r;
+      if (b > totalRows) totalRows = b;
+    }
+    // Fall back to _lastCols/_lastRows if pane data is missing.
+    if (totalCols <= 0) totalCols = _lastCols;
+    if (totalRows <= 0) totalRows = _lastRows;
     if (totalCols <= 0 || totalRows <= 0) return null;
     final cellW = size.width / totalCols;
     final cellH = size.height / totalRows;
     final col = pos.dx / cellW;
     final row = pos.dy / cellH;
+    // Find closest pane — use centre-distance to handle separator columns
+    // gracefully rather than strict boundary membership.
+    _PaneData? best;
+    double bestDist = double.infinity;
     for (final pane in win.panes) {
-      if (col >= pane.left && col < pane.left + pane.width &&
-          row >= pane.top  && row < pane.top  + pane.height) {
-        return pane.id;
+      final cx = pane.left + pane.width / 2.0;
+      final cy = pane.top  + pane.height / 2.0;
+      final dx = col - cx;
+      final dy = row - cy;
+      // Weight horizontal distance more to handle left/right splits better.
+      final dist = dx * dx * 1.5 + dy * dy;
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = pane;
       }
     }
-    return null;
+    return best?.id;
   }
 
-  /// Scroll up/down N lines in tmux copy-mode. Enters copy-mode if needed.
-  /// lines > 0 = scroll-up (finger dragged down), lines < 0 = scroll-down (finger dragged up).
+  /// Scroll up/down N lines in tmux copy-mode via SSH exec.
+  /// lines > 0 = scroll-up (finger dragged down), lines < 0 = scroll-down.
+  /// When scrolling down and the offset reaches 0 (bottom), exits copy-mode automatically.
   void _tmuxScroll(int lines) {
     if (!widget.state.sshService.isConnected) return;
+    if (!_inCopyMode) setState(() => _inCopyMode = true);
+    final target = _currentTarget;
     final dir = lines > 0 ? 'scroll-up' : 'scroll-down';
     final count = lines.abs();
-    final target = _currentTarget;
-    // Always prefix with copy-mode -t to ensure we're in copy-mode before scrolling.
-    // copy-mode is a no-op if already active, so this is safe to repeat.
-    final scrollCmds = "for i in \$(seq $count); do tmux send-keys -X -t '$target' $dir; done";
-    if (!_inCopyMode) setState(() => _inCopyMode = true);
-    widget.state.sshService.executeCommand(
-      "tmux copy-mode -t '$target'; $scrollCmds",
-    ).catchError((e) { debugPrint('[tmux-scroll] error: $e'); return ''; });
+    final scrollKeys = List.filled(count, "tmux send-keys -X -t '$target' $dir").join('; ');
+
+    if (lines < 0) {
+      // Scroll-down: after scrolling, check if we've hit the bottom (offset=0).
+      // If so, exit copy-mode automatically.
+      widget.state.sshService.executeCommandFast(
+        "tmux copy-mode -t '$target'; $scrollKeys; "
+        "tmux display-message -p -t '$target' '#{scroll_position}'",
+      ).then((out) {
+        final offset = int.tryParse(out.trim()) ?? -1;
+        if (offset == 0 && mounted) _exitCopyMode();
+      }).catchError((e) { debugPrint('[tmux-scroll] error: $e'); });
+    } else {
+      widget.state.sshService.executeCommandFast(
+        "tmux copy-mode -t '$target'; $scrollKeys",
+      ).catchError((e) { debugPrint('[tmux-scroll] error: $e'); return ''; });
+    }
   }
 
   void _exitCopyMode() {
     if (!_inCopyMode) return;
     setState(() => _inCopyMode = false);
-    widget.state.sshService.executeCommand(
-      'tmux send-keys -X -t $_currentTarget cancel 2>/dev/null || true',
-    ).catchError((_) => '');
+    // Send cancel via the attached PTY stdin — tmux receives it directly.
+    _session?.stdin.add(utf8.encode('q'));
   }
 
   void _switchToWindow(int windowIndex) {
-    _session?.stdin.add(utf8.encode(
-      'tmux select-window -t ${widget.sessionName}:$windowIndex\n',
-    ));
+    widget.state.sshService.executeCommandFast(
+      'tmux select-window -t ${widget.sessionName}:$windowIndex',
+    ).catchError((_) => '');
     setState(() {
       _activeWindowIndex = windowIndex;
       _activePaneId = null;
@@ -900,10 +981,11 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
   }
 
   void _switchToPane(String paneId) {
-    _session?.stdin.add(utf8.encode(
-      'tmux select-pane -t $paneId\n',
-    ));
+    widget.state.sshService.executeCommandFast(
+      'tmux select-pane -t $paneId && tmux resize-pane -Z -t $paneId',
+    ).catchError((_) => '');
     setState(() => _activePaneId = paneId);
+    Future.delayed(const Duration(milliseconds: 400), _loadWindowPaneData);
   }
 
   Future<void> _startSession() async {
@@ -937,27 +1019,27 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
 
       Future.delayed(const Duration(milliseconds: 800), () async {
         if (!mounted) return;
-        // Load window/pane data for the nav bar
-        _loadWindowPaneData();
         try {
           if (widget.initialPaneId != null) {
-            // Zoom the requested pane via separate SSH exec (not PTY stdin).
-            await widget.state.sshService.executeCommand(
+            // Zoom the requested pane. Select it first, then zoom.
+            // Use executeCommandFast — no login shell overhead.
+            await widget.state.sshService.executeCommandFast(
               'tmux select-pane -t ${widget.initialPaneId} && '
               'tmux resize-pane -Z -t ${widget.initialPaneId}',
             );
           } else {
-            // Connecting to a session/window: unzoom any currently zoomed pane
-            // so the full window layout is visible.
+            // Connecting to a session/window: unzoom any currently zoomed pane.
             final target = widget.initialWindowIndex != null
                 ? '${widget.sessionName}:${widget.initialWindowIndex}'
                 : widget.sessionName;
-            await widget.state.sshService.executeCommand(
+            await widget.state.sshService.executeCommandFast(
               '[ "\$(tmux display-message -p \'#{window_zoomed_flag}\' -t $target 2>/dev/null)" = "1" ] && '
               'tmux resize-pane -Z -t $target || true',
             );
           }
         } catch (_) {}
+        // Load pane data AFTER zoom/unzoom so _windows reflects the correct state.
+        if (mounted) _loadWindowPaneData();
       });
     } catch (e) {
       if (mounted) {
@@ -967,12 +1049,14 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
     }
   }
 
-  /// Wraps _sendKey: if in copy-mode, any key exits it first (Escape cancels,
-  /// others exit copy-mode then send the key normally).
+  /// Wraps _sendKey: routes keys appropriately based on mode.
   void _sendKeyWithCopyMode(String key) {
     if (_inCopyMode) {
+      // In copy-mode: Up/Down scroll further; anything else exits first.
+      if (key == 'Up') { _tmuxScroll(3); return; }
+      if (key == 'Down') { _tmuxScroll(-3); return; }
       _exitCopyMode();
-      if (key == 'Escape') return; // Escape just exits copy-mode
+      if (key == 'Escape') return;
     }
     _sendKey(key);
   }
@@ -1032,17 +1116,20 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
 
   @override
   void dispose() {
-    // If we zoomed a pane, unzoom it when navigating away (X button / back).
-    // Fire-and-forget — we don't await since dispose() is synchronous.
+    // If we zoomed a pane, unzoom it unconditionally on leave.
+    // Use 'resize-pane -Z' only if currently zoomed (check flag first) to avoid
+    // toggling back to zoomed state on a race with re-entry.
     if (widget.initialPaneId != null && widget.state.sshService.isConnected) {
-      widget.state.sshService.executeCommand(
-        'tmux resize-pane -Z -t ${widget.initialPaneId} 2>/dev/null || true',
+      final svc = widget.state.sshService;
+      final sessionName = widget.sessionName;
+      svc.executeCommandFast(
+        '[ "\$(tmux display-message -p \'#{window_zoomed_flag}\' -t $sessionName 2>/dev/null)" = "1" ] && '
+        'tmux resize-pane -Z -t $sessionName || true',
       ).catchError((_) => '');
     }
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _session?.close();
     _terminalController.dispose();
-    _scrollController.dispose();
     super.dispose();
   }
 
@@ -1206,6 +1293,7 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
     if (isLandscape) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
@@ -1225,33 +1313,37 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
       );
     }
 
-    final bool isPaneZoomed = _windows.any((w) => w.zoomed);
-
     // Pixels of drag per tmux scroll line. Smaller = faster scrolling.
-    const double pixelsPerLine = 15.0;
-
+    const double pixelsPerLine = 18.0;
+    // Minimum drag before scroll starts, to avoid accidental scrolls on taps.
+    const double dragThreshold = 6.0;
     // Single Listener handles pinch-to-zoom, mouse-wheel scroll, AND
     // single-finger drag scroll. Using Listener (not GestureDetector) means
     // we never enter the gesture arena, so TerminalView cannot steal touches.
+    // In pane-zoom mode: drag/wheel → xterm native scroll (instant, no SSH).
+    // In session/multi-pane mode: drag/wheel → tmux copy-mode (SSH round-trip).
     final terminalWidget = Listener(
       onPointerSignal: (e) {
-        // Mouse wheel on Linux/desktop → tmux copy-mode scroll.
         if (e is PointerScrollEvent) {
-          // scrollDelta.dy > 0 = wheel down = scroll-down (negative lines)
-          final lines = -(e.scrollDelta.dy / pixelsPerLine).round();
+          // scrollDelta.dy > 0 = wheel down = scroll toward older content (up)
+          final lines = (e.scrollDelta.dy / pixelsPerLine).round();
           if (lines != 0) _tmuxScroll(lines);
         }
       },
       onPointerDown: (e) {
         _pointers[e.pointer] = e.localPosition;
+        _dragActive = false;
         if (_pointers.length == 1) {
-          // Detect which pane was touched for accurate scroll targeting
-          final rb = _terminalKey.currentContext?.findRenderObject() as RenderBox?;
-          if (rb != null) {
-            _scrollTargetPaneId = _paneIdAtPixel(e.localPosition, rb.size);
+          if (widget.initialPaneId == null) {
+            final rb = _terminalKey.currentContext?.findRenderObject() as RenderBox?;
+            if (rb != null) {
+              _scrollTargetPaneId = _paneIdAtPixel(e.localPosition, rb.size);
+            }
           }
+          _dragAccum = 0;
         } else if (_pointers.length == 2) {
-          _dragAccum = 0; // cancel any single-finger accumulation
+          _dragAccum = 0;
+          _dragActive = false;
           final pts = _pointers.values.toList();
           _initialPinchDistance = (pts[0] - pts[1]).distance;
           _fontSizeAtPinchStart = _fontSize;
@@ -1261,39 +1353,48 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
         final prev = _pointers[e.pointer];
         _pointers[e.pointer] = e.localPosition;
         if (_pointers.length == 2 && _initialPinchDistance > 0) {
-          // Two-finger pinch zoom
           final pts = _pointers.values.toList();
           final dist = (pts[0] - pts[1]).distance;
           setState(() {
             _fontSize = (_fontSizeAtPinchStart * dist / _initialPinchDistance).clamp(7.0, 28.0);
           });
         } else if (_pointers.length == 1 && prev != null) {
-          // Single-finger drag → tmux copy-mode scroll
-          // dy > 0 means finger moved DOWN → content scrolls UP (scroll-up)
-          // dy < 0 means finger moved UP   → content scrolls DOWN (scroll-down)
-          _dragAccum += e.localPosition.dy - prev.dy;
+          final dy = e.localPosition.dy - prev.dy;
+          _dragAccum += dy;
+          if (!_dragActive && _dragAccum.abs() < dragThreshold) return;
+          _dragActive = true;
           final lines = (_dragAccum / pixelsPerLine).truncate();
           if (lines != 0) {
             _dragAccum -= lines * pixelsPerLine;
-            _tmuxScroll(lines); // lines>0 = scroll-up, lines<0 = scroll-down
+            // dy>0 = finger dragged down = scroll toward older content (up in buffer)
+            _tmuxScroll(lines);
           }
         }
       },
       onPointerUp: (e) {
         _pointers.remove(e.pointer);
-        if (_pointers.isEmpty) { _dragAccum = 0; _scrollTargetPaneId = null; }
+        if (_pointers.isEmpty) {
+          _dragAccum = 0;
+          _dragActive = false;
+          _scrollTargetPaneId = null;
+        }
       },
       onPointerCancel: (e) {
         _pointers.remove(e.pointer);
-        if (_pointers.isEmpty) { _dragAccum = 0; _scrollTargetPaneId = null; }
+        if (_pointers.isEmpty) {
+          _dragAccum = 0;
+          _dragActive = false;
+          _scrollTargetPaneId = null;
+        }
       },
         child: Container(
           key: _terminalKey,
-          color: Colors.black,
+          color: isDark ? Colors.black : const Color(0xFFf5f6f8),
           child: TerminalView(
             _terminal,
             controller: _terminalController,
-            scrollController: _scrollController,
+
+            theme: isDark ? TerminalThemes.defaultTheme : _lightTerminalTheme,
             padding: EdgeInsets.zero,
             textStyle: TerminalStyle(fontSize: _fontSize),
           ),
@@ -1310,7 +1411,7 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(widget.sessionName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                    if (isPaneZoomed && activeWin != null) ...[
+                    if (widget.initialPaneId != null && activeWin != null) ...[
                       _breadcrumbSeparator(),
                       _breadcrumbItem(
                         '${activeWin.index}: ${activeWin.name}',
@@ -1353,8 +1454,8 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
             child: Stack(
               children: [
                 terminalWidget,
-                // Copy-mode badge — tap to exit
-                if (_inCopyMode)
+                // Copy-mode badge (window/multi-pane mode only) — tap to exit
+                if (_inCopyMode && widget.initialPaneId == null)
                   Positioned(
                     top: 8,
                     right: 8,
@@ -1399,7 +1500,11 @@ class _TmuxSessionPageState extends State<TmuxSessionPage> {
               ],
             ),
           ),
-          SpecialKeysBar(onKey: _sendKeyWithCopyMode),
+          SpecialKeysBar(
+            onKey: _sendKeyWithCopyMode,
+            prefix: _tmuxPrefix,
+            onPrefixChanged: _saveTmuxPrefix,
+          ),
         ],
       ),
     );

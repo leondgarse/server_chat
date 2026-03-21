@@ -45,17 +45,12 @@ class SSHService {
       _client!.done.then((_) => _handleUnexpectedDisconnect())
                    .catchError((_) => _handleUnexpectedDisconnect());
 
-      // Secondary timer: ensures we notice a dead socket even if the protocol
-      // keepalive reply is swallowed by a NAT/firewall without closing the TCP stream.
+      // Secondary timer: detects dead connections by checking isConnected.
+      // We do NOT open a new SSH channel here — the protocol-level keepAliveInterval
+      // (20s) is sufficient to detect broken connections without consuming session slots.
       _keepAliveTimer?.cancel();
-      _keepAliveTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+      _keepAliveTimer = Timer.periodic(const Duration(seconds: 30), (_) {
         if (!isConnected) {
-          _handleUnexpectedDisconnect();
-          return;
-        }
-        try {
-          await _client!.run('true');
-        } catch (_) {
           _handleUnexpectedDisconnect();
         }
       });
@@ -65,12 +60,9 @@ class SSHService {
         await _setupLocalForwards(tunnels);
       }
 
-      // Cache home directory.
-      final result = await _client!.run('echo \$HOME');
-      _homeDir = utf8.decode(result).trim();
-      if (_homeDir == null || _homeDir!.isEmpty) {
-        _homeDir = '/home/$username';
-      }
+      // Cache home directory using executeCommandFast (avoids run() channel leak).
+      _homeDir = (await executeCommandFast('echo \$HOME')).trim();
+      if (_homeDir!.isEmpty) _homeDir = '/home/$username';
     } catch (e) {
       debugPrint('SSH Connection Error: $e');
       _client?.close();
@@ -196,6 +188,24 @@ class SSHService {
     } finally {
       _activeCommand = null;
     }
+  }
+
+  /// Like [executeCommand] but uses plain `bash -c` (no login/interactive flags).
+  /// Much faster — suitable for simple commands like tmux control that don't
+  /// need the user's PATH or shell startup files.
+  Future<String> executeCommandFast(String command) async {
+    if (!isConnected) throw Exception('Not connected to SSH server');
+    final session = await _client!.execute('bash -c ${_shellEscape(command)}');
+    final out = StringBuffer();
+    final done = Completer<void>();
+    session.stdout.listen(
+      (d) => out.write(utf8.decode(d, allowMalformed: true)),
+      onDone: () { if (!done.isCompleted) done.complete(); },
+      onError: (e) { if (!done.isCompleted) done.completeError(e); },
+    );
+    session.stderr.listen((_) {});
+    await done.future;
+    return out.toString();
   }
 
   /// Shell-escape a command string for use with bash -c

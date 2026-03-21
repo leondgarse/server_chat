@@ -78,18 +78,14 @@ class _TerminalTabState extends State<TerminalTab> with AutomaticKeepAliveClient
     _cmdHistory.add(cmd);
     _historyIndex = -1;
 
-    // If interactive command, open in a new page
+    // If interactive command, push a dedicated PTY page
     if (_isInteractiveCommand(cmd)) {
       _cmdController.clear();
       if (!mounted) return;
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => ChangeNotifierProvider.value(
-            value: state,
-            child: InteractiveShellPage(command: cmd, workingDir: state.currentPath),
-          ),
-        ),
-      );
+      final state = Provider.of<AppState>(context, listen: false);
+      Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => InteractiveShellPage(command: cmd, workingDir: state.currentPath),
+      ));
       return;
     }
 
@@ -236,22 +232,6 @@ class _TerminalTabState extends State<TerminalTab> with AutomaticKeepAliveClient
             tooltip: 'Next command',
           ),
           const ThemeSwitchButton(),
-          IconButton(
-            icon: const Icon(Icons.open_in_full, size: 20),
-            tooltip: 'Full terminal (PTY)',
-            onPressed: () {
-              if (!state.isConnected) return;
-              Navigator.of(context).push(MaterialPageRoute(
-                builder: (_) => ChangeNotifierProvider.value(
-                  value: state,
-                  child: InteractiveShellPage(
-                    command: 'bash',
-                    workingDir: state.currentPath,
-                  ),
-                ),
-              ));
-            },
-          ),
           const ConnectionButton(),
         ],
       ),

@@ -7,6 +7,7 @@ import '../models/app_state.dart';
 import 'terminal_tab.dart';
 import 'file_edit_tab.dart';
 import 'claude_tab.dart';
+import 'pty_tab.dart';
 import 'tmux_tab.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -18,16 +19,18 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _currentIndex = 0;
 
-  final List<Widget> _tabs = [
-    const TerminalTab(),
-    const FileEditTab(),
-    const ClaudeTab(),
-    const TmuxTab(),
-  ];
+  late final List<Widget> _tabs;
 
   @override
   void initState() {
     super.initState();
+    _tabs = [
+      const TerminalTab(),
+      const FileEditTab(),
+      const PtyTab(),
+      const ClaudeTab(),
+      const TmuxTab(),
+    ];
     WidgetsBinding.instance.addPostFrameCallback((_) => _tryAutoConnect());
   }
 
@@ -66,6 +69,7 @@ class _HomeScreenState extends State<HomeScreen> {
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.code),       label: 'SHELL'),
           BottomNavigationBarItem(icon: Icon(Icons.folder),     label: 'FILES'),
+          BottomNavigationBarItem(icon: Icon(Icons.terminal),   label: 'PTY'),
           BottomNavigationBarItem(icon: Icon(Icons.smart_toy),  label: 'CLAUDE'),
           BottomNavigationBarItem(icon: Icon(Icons.view_agenda),label: 'TMUX'),
         ],
