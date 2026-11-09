@@ -25,12 +25,12 @@ A Flutter SSH client for Android/Linux with a chat-style UX for Claude Code sess
 - Path field automatically follows the current working directory from Shell
 
 ### Claude Tab
-- Chat interface to [Claude Code](https://github.com/anthropics/claude-code) running on the server
-- Uses `claude -p --output-format stream-json --verbose --dangerously-skip-permissions`
-- Streams assistant text, tool calls (`▶ Bash: ls -la`), and actual tool output in real time
-- Session resume: re-uses the last `session_id` with `--resume`
+- Lists the [Claude Code](https://github.com/anthropics/claude-code) history sessions for the current directory (read from `~/.claude/projects/<encoded-path>/*.jsonl`, newest first) with title, age, message count and size
+- Tap a session → **Start in Remote Control**: runs `claude --resume <id> --remote-control` in a detached tmux session (`crc-<id8>`), so it keeps running after the app disconnects and can be continued from the Claude app / claude.ai/code
+- **New** starts a fresh `claude --remote-control [name]` session in the current directory
+- Running RC sessions show an `RC` badge; open them to see the live pane output + session URL, attach the terminal (to answer trust / enable prompts), or stop them
+- Settings: custom claude command (alias / function / path) and optional `--dangerously-skip-permissions`
 - Folder picker for working directory; automatically follows Shell/Files current path
-- Prompt history (↑/↓ in AppBar)
 
 ### Tmux Tab
 - Lists all tmux sessions, windows, and panes in a tree view
@@ -62,7 +62,7 @@ A Flutter SSH client for Android/Linux with a chat-style UX for Claude Code sess
 All editing/execution tabs share a single working-directory state (`AppState.currentPath`):
 - **Shell** — updated on every `cd` command
 - **Files** — path field follows Shell's directory automatically (unless a file is already open)
-- **Claude** — uses the current path as the project directory for every prompt (auto-updates when idle)
+- **Claude** — lists history sessions of the current path (reloads when the path changes)
 
 ## Special Keys Bar
 
@@ -92,7 +92,7 @@ lib/
 │   ├── terminal_tab.dart            # Chat-style shell
 │   ├── pty_tab.dart                 # Persistent PTY shell tab
 │   ├── tmux_tab.dart                # Tmux tree view + full xterm session
-│   ├── claude_tab.dart              # Claude Code chat
+│   ├── claude_tab.dart              # Claude history sessions + Remote Control launcher
 │   ├── file_edit_tab.dart           # Remote file editor
 │   └── interactive_shell_page.dart  # Full-screen PTY pushed for interactive shell commands
 ├── services/
@@ -144,7 +144,7 @@ Defined in `DESIGN.md`. Summary:
 
 ## Known Limitations
 
-- Claude tab uses `--dangerously-skip-permissions` (required for non-interactive mode)
+- Claude Remote Control requires a claude.ai subscription login on the server and `tmux` installed
 - Tmux terminal sizing requires the SSH handshake to complete after the first layout frame; initial render may briefly show default 80×25 before correct resize
 - Large file edits load the entire file into memory
 - No SSH host key verification (trusts all hosts)
