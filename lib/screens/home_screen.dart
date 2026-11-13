@@ -42,19 +42,8 @@ class _HomeScreenState extends State<HomeScreen> {
       final file = File('${dir.path}/ssh_config.json');
       if (!await file.exists()) return;
       final j = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
-      final host = (j['host'] as String? ?? '').trim();
-      final user = (j['user'] as String? ?? '').trim();
-      if (host.isEmpty || user.isEmpty) return;
       if (!mounted) return;
-      final tunnels = (j['tunnels'] as String? ?? '').trim();
-      await state.connect(
-        host,
-        int.tryParse(j['port'] as String? ?? '22') ?? 22,
-        user,
-        (j['pass'] as String? ?? '').isNotEmpty ? j['pass'] as String : null,
-        (j['key']  as String? ?? '').isNotEmpty ? j['key']  as String : null,
-        tunnels: tunnels.isNotEmpty ? tunnels : null,
-      );
+      await state.connectFromConfig(j);
     } catch (_) {}
   }
 

@@ -107,18 +107,7 @@ class AppState extends ChangeNotifier {
       final file = File('${dir.path}/ssh_config.json');
       if (!await file.exists()) return;
       final j = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
-      final host = (j['host'] as String? ?? '').trim();
-      final user = (j['user'] as String? ?? '').trim();
-      if (host.isEmpty || user.isEmpty) return;
-      final tunnels = (j['tunnels'] as String? ?? '').trim();
-      await connect(
-        host,
-        int.tryParse(j['port'] as String? ?? '22') ?? 22,
-        user,
-        (j['pass'] as String? ?? '').isNotEmpty ? j['pass'] as String : null,
-        (j['key']  as String? ?? '').isNotEmpty ? j['key']  as String : null,
-        tunnels: tunnels.isNotEmpty ? tunnels : null,
-      );
+      if (!await connectFromConfig(j)) return;
       if (isConnected) {
         _reconnectAttempts = 0;
       } else {
@@ -146,7 +135,46 @@ class AppState extends ChangeNotifier {
 
   // ── Connect / Disconnect ───────────────────────────────────────────────────
 
-  Future<void> connect(String host, int port, String username, String? password, String? privateKey, {String? tunnels}) async {
+  /// Connect using a saved config map (the `ssh_config.json` / profile format).
+  /// Returns false if the config lacks a host or user.
+  Future<bool> connectFromConfig(Map<String, dynamic> j) async {
+    String str(String k) => (j[k] as String? ?? '').trim();
+    String? opt(String k) => (j[k] as String? ?? '').isNotEmpty ? j[k] as String : null;
+    final host = str('host');
+    final user = str('user');
+    if (host.isEmpty || user.isEmpty) return false;
+    final tunnels = str('tunnels');
+    SSHJumpHost? jump;
+    if (str('jump') == '1' && str('jumpHost').isNotEmpty) {
+      final jumpPass = opt('jumpPass');
+      final jumpKey  = opt('jumpKey');
+      final reuse = jumpPass == null && jumpKey == null;
+      jump = SSHJumpHost(
+        host: str('jumpHost'),
+        port: int.tryParse(str('jumpPort')) ?? 22,
+        username: str('jumpUser').isNotEmpty ? str('jumpUser') : user,
+        // No jump credentials given → reuse the target's password/key.
+        password: reuse ? opt('pass') : jumpPass,
+        privateKey: reuse ? opt('key') : jumpKey,
+      );
+    }
+    await connect(
+      host,
+      int.tryParse(str('port')) ?? 22,
+      user,
+      opt('pass'),
+      opt('key'),
+      tunnels: tunnels.isNotEmpty ? tunnels : null,
+      jump: jump,
+    );
+    return true;
+  }
+
+  /// "via user@bastion" label for the current connection, or null if direct.
+  String? get jumpLabel => _jumpLabel;
+  String? _jumpLabel;
+
+  Future<void> connect(String host, int port, String username, String? password, String? privateKey, {String? tunnels, SSHJumpHost? jump}) async {
     _reconnectTimer?.cancel();
     _isConnecting = true;
     _lastError = null;
@@ -160,9 +188,11 @@ class AppState extends ChangeNotifier {
         password: password,
         privateKey: privateKey,
         tunnels: tunnels,
+        jump: jump,
       );
 
       if (sshService.isConnected) {
+        _jumpLabel = jump == null ? null : '${jump.username}@${jump.host}';
         _currentPath = sshService.homeDir;
         _reconnectAttempts = 0;
         try { await WakelockPlus.enable(); } catch (_) {}

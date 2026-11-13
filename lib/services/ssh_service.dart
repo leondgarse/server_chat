@@ -5,8 +5,29 @@ import 'dart:typed_data';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 
+/// Optional bastion / jump host (like OpenSSH `ProxyJump`). The app connects
+/// to this host first, then opens a direct-tcpip channel to the target and
+/// runs the target SSH session over it — so inner servers that are only
+/// reachable from the bastion can be used directly.
+class SSHJumpHost {
+  final String host;
+  final int port;
+  final String username;
+  final String? password;
+  final String? privateKey;
+
+  const SSHJumpHost({
+    required this.host,
+    this.port = 22,
+    required this.username,
+    this.password,
+    this.privateKey,
+  });
+}
+
 class SSHService {
   SSHClient? _client;
+  SSHClient? _jumpClient;
   String? _homeDir;
   Timer? _keepAliveTimer;
   SSHSession? _activeCommand;
@@ -25,9 +46,12 @@ class SSHService {
     String? password,
     String? privateKey,
     String? tunnels,
+    SSHJumpHost? jump,
   }) async {
     try {
-      final socket = await SSHSocket.connect(host, port);
+      final socket = jump != null
+          ? await _openViaJump(jump, host, port)
+          : await SSHSocket.connect(host, port);
 
       _client = SSHClient(
         socket,
@@ -67,7 +91,34 @@ class SSHService {
       debugPrint('SSH Connection Error: $e');
       _client?.close();
       _client = null;
+      _jumpClient?.close();
+      _jumpClient = null;
       rethrow;
+    }
+  }
+
+  /// Hop 1: authenticate to the bastion. Hop 2: open a direct-tcpip channel
+  /// from it to the target's SSH port and return it as the transport socket.
+  Future<SSHSocket> _openViaJump(SSHJumpHost jump, String host, int port) async {
+    final pass = jump.password;
+    final key  = jump.privateKey;
+    final jc = SSHClient(
+      await SSHSocket.connect(jump.host, jump.port),
+      username: jump.username,
+      onPasswordRequest: pass != null ? () => pass : null,
+      identities: key != null ? [...SSHKeyPair.fromPem(key)] : null,
+      keepAliveInterval: const Duration(seconds: 20),
+    );
+    _jumpClient = jc;
+    try {
+      await jc.authenticated;
+    } catch (e) {
+      throw Exception('Jump host ${jump.host}: $e');
+    }
+    try {
+      return await jc.forwardLocal(host, port);
+    } catch (e) {
+      throw Exception('Jump host could not reach $host:$port: $e');
     }
   }
 
@@ -78,6 +129,8 @@ class SSHService {
     _keepAliveTimer?.cancel();
     _keepAliveTimer = null;
     _client = null;
+    _jumpClient?.close();
+    _jumpClient = null;
     _closeLocalForwards();
     onDisconnected?.call();
   }
@@ -144,6 +197,8 @@ class SSHService {
     _homeDir = null;
     _closeLocalForwards();
     c?.close();
+    _jumpClient?.close();
+    _jumpClient = null;
   }
 
   /// Resolve ~ to actual home directory

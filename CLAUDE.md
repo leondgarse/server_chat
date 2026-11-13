@@ -126,6 +126,13 @@ All three content tabs share `AppState.currentPath`:
 - `_closeLocalForwards()` called on both `disconnect()` and `_handleUnexpectedDisconnect()`
 - ConnectTab UI: dynamic list of `localPort → remotePort` rows with + Add / × remove; remote host always `localhost`
 
+### Jump Host (ProxyJump)
+- Optional bastion for reaching inner servers that aren't publicly exposed (like `ssh -J`)
+- `SSHService.connect(jump: SSHJumpHost(...))`: `_openViaJump()` authenticates to the bastion (`_jumpClient`), then `forwardLocal(targetHost, targetPort)` → the returned `SSHForwardChannel` (implements `SSHSocket`) is the transport for the real `SSHClient`. All tabs, SFTP and tunnels then act on the inner server
+- `_jumpClient` is closed on `disconnect()`, `_handleUnexpectedDisconnect()` and connect failure; a dropped bastion closes the channel, which fires the inner client's `done`
+- Config keys (ssh_config.json + profiles, all strings): `jump` (`'1'`/`'0'`), `jumpHost`, `jumpPort`, `jumpUser` (empty → target user), `jumpPass`, `jumpKey` (both empty → reuse target's pass/key)
+- `AppState.connectFromConfig(map)` is the single entry point used by ConnectTab, `_tryAutoConnect()` and auto-reconnect; `AppState.jumpLabel` shows "via user@bastion" in the Connect banner
+
 ### SSH Service (`ssh_service.dart`)
 - Keepalive: protocol-level (`keepAliveInterval: 20s`) only. Secondary `Timer.periodic(30s)` checks `isConnected` locally — does NOT open SSH channels (avoids channel slot exhaustion).
 - Home dir cached at connect via `executeCommandFast('echo $HOME')` — NOT `_client!.run()`. `run()` has a dartssh2 bug where it does not close the SSH channel after completion, leaving a slot permanently occupied. `executeCommandFast` properly awaits channel close via stream `onDone`.

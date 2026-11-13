@@ -22,6 +22,14 @@ class _ConnectTabState extends State<ConnectTab> {
   final _keyController  = TextEditingController();
   final List<_TunnelRow> _tunnelRows = [];
 
+  // Jump host (ProxyJump) — connect to the target through a bastion server.
+  bool _useJump = false;
+  final _jumpHostController = TextEditingController();
+  final _jumpPortController = TextEditingController(text: '22');
+  final _jumpUserController = TextEditingController();
+  final _jumpPassController = TextEditingController();
+  final _jumpKeyController  = TextEditingController();
+
   // Saved named profiles  { name: {host,port,user,pass,key} }
   Map<String, Map<String, String>> _profiles = {};
 
@@ -38,6 +46,11 @@ class _ConnectTabState extends State<ConnectTab> {
     _userController.dispose();
     _passController.dispose();
     _keyController.dispose();
+    _jumpHostController.dispose();
+    _jumpPortController.dispose();
+    _jumpUserController.dispose();
+    _jumpPassController.dispose();
+    _jumpKeyController.dispose();
     for (final r in _tunnelRows) r.dispose();
     super.dispose();
   }
@@ -58,14 +71,7 @@ class _ConnectTabState extends State<ConnectTab> {
       if (await file.exists()) {
         final j = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
         if (mounted) {
-          setState(() {
-            _hostController.text = j['host'] ?? '';
-            _portController.text = j['port'] ?? '22';
-            _userController.text = j['user'] ?? '';
-            _passController.text = j['pass'] ?? '';
-            _keyController.text  = j['key']  ?? '';
-            _loadTunnelRows(j['tunnels'] as String? ?? '');
-          });
+          setState(() => _applyConfig(j.map((k, v) => MapEntry(k, '${v ?? ''}'))));
         }
       }
     } catch (_) {
@@ -96,15 +102,40 @@ class _ConnectTabState extends State<ConnectTab> {
     } catch (_) {}
   }
 
+  /// Current form as the persisted config map (ssh_config.json / profile).
+  Map<String, String> get _currentConfig => {
+    'host':     _hostController.text,
+    'port':     _portController.text,
+    'user':     _userController.text,
+    'pass':     _passController.text,
+    'key':      _keyController.text,
+    'tunnels':  _tunnelsString,
+    'jump':     _useJump ? '1' : '0',
+    'jumpHost': _jumpHostController.text,
+    'jumpPort': _jumpPortController.text,
+    'jumpUser': _jumpUserController.text,
+    'jumpPass': _jumpPassController.text,
+    'jumpKey':  _jumpKeyController.text,
+  };
+
+  /// Fill the form from a config map. Call inside setState.
+  void _applyConfig(Map<String, String> p) {
+    _hostController.text = p['host'] ?? '';
+    _portController.text = p['port'] ?? '22';
+    _userController.text = p['user'] ?? '';
+    _passController.text = p['pass'] ?? '';
+    _keyController.text  = p['key']  ?? '';
+    _loadTunnelRows(p['tunnels'] ?? '');
+    _useJump = p['jump'] == '1';
+    _jumpHostController.text = p['jumpHost'] ?? '';
+    _jumpPortController.text = (p['jumpPort'] ?? '').isEmpty ? '22' : p['jumpPort']!;
+    _jumpUserController.text = p['jumpUser'] ?? '';
+    _jumpPassController.text = p['jumpPass'] ?? '';
+    _jumpKeyController.text  = p['jumpKey']  ?? '';
+  }
+
   Future<void> _saveLastUsed() async {
-    final config = {
-      'host':    _hostController.text,
-      'port':    _portController.text,
-      'user':    _userController.text,
-      'pass':    _passController.text,
-      'key':     _keyController.text,
-      'tunnels': _tunnelsString,
-    };
+    final config = _currentConfig;
     try {
       final file = await _getConfigFile();
       await file.writeAsString(jsonEncode(config));
@@ -125,14 +156,7 @@ class _ConnectTabState extends State<ConnectTab> {
   void _loadProfile(String name) {
     final p = _profiles[name];
     if (p == null) return;
-    setState(() {
-      _hostController.text = p['host'] ?? '';
-      _portController.text = p['port'] ?? '22';
-      _userController.text = p['user'] ?? '';
-      _passController.text = p['pass'] ?? '';
-      _keyController.text  = p['key']  ?? '';
-      _loadTunnelRows(p['tunnels'] ?? '');
-    });
+    setState(() => _applyConfig(p));
   }
 
   Future<void> _saveProfileDialog() async {
@@ -162,14 +186,7 @@ class _ConnectTabState extends State<ConnectTab> {
     );
     if (name == null || name.isEmpty) return;
     setState(() {
-      _profiles[name] = {
-        'host':    _hostController.text,
-        'port':    _portController.text,
-        'user':    _userController.text,
-        'pass':    _passController.text,
-        'key':     _keyController.text,
-        'tunnels': _tunnelsString,
-      };
+      _profiles[name] = _currentConfig;
     });
     await _saveProfilesToPrefs();
     if (mounted) {
@@ -192,15 +209,13 @@ class _ConnectTabState extends State<ConnectTab> {
         const SnackBar(content: Text('Hostname and Username are required')));
       return;
     }
+    if (_useJump && _jumpHostController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Jump host address is required (or turn the jump host off)')));
+      return;
+    }
     await _saveLastUsed();
-    await state.connect(
-      _hostController.text,
-      int.tryParse(_portController.text) ?? 22,
-      _userController.text,
-      _passController.text.isNotEmpty ? _passController.text : null,
-      _keyController.text.isNotEmpty  ? _keyController.text  : null,
-      tunnels: _tunnelsString.isNotEmpty ? _tunnelsString : null,
-    );
+    await state.connectFromConfig(_currentConfig);
     if (!context.mounted) return;
     if (state.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -278,7 +293,9 @@ class _ConnectTabState extends State<ConnectTab> {
                 child: Row(children: [
                   const Icon(Icons.check_circle, color: Colors.green),
                   const SizedBox(width: 12),
-                  Expanded(child: Text('Connected to ${_hostController.text}')),
+                  Expanded(child: Text(state.jumpLabel == null
+                      ? 'Connected to ${_hostController.text}'
+                      : 'Connected to ${_hostController.text}\nvia ${state.jumpLabel}')),
                   TextButton(
                     onPressed: () async {
                       final ok = await showDialog<bool>(
@@ -311,7 +328,8 @@ class _ConnectTabState extends State<ConnectTab> {
                 leading: const Icon(Icons.history, size: 18),
                 title: Text(name),
                 subtitle: Text(
-                  '${_profiles[name]!['user']}@${_profiles[name]!['host']}:${_profiles[name]!['port']}',
+                  '${_profiles[name]!['user']}@${_profiles[name]!['host']}:${_profiles[name]!['port']}'
+                  '${_profiles[name]!['jump'] == '1' ? '  via ${_profiles[name]!['jumpHost']}' : ''}',
                   style: const TextStyle(fontSize: 12),
                 ),
                 onTap: () => _loadProfile(name),
@@ -374,6 +392,10 @@ class _ConnectTabState extends State<ConnectTab> {
                   labelText: 'SSH Private Key (optional)',
                   alignLabelWithHint: true),
             ),
+            const SizedBox(height: 24),
+
+            // ── Jump host (ProxyJump) ──────────────────────────────────────
+            _buildJumpSection(),
             const SizedBox(height: 24),
 
             // ── Local port tunnels ─────────────────────────────────────────
@@ -465,6 +487,85 @@ class _ConnectTabState extends State<ConnectTab> {
           ],
         ),
       ),
+    );
+  }
+
+  // ── Jump host section ───────────────────────────────────────────────────────
+
+  Widget _buildJumpSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          const Expanded(
+            child: Text('JUMP HOST',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
+          ),
+          Switch(
+            value: _useJump,
+            onChanged: (v) => setState(() => _useJump = v),
+          ),
+        ]),
+        Text(
+          _useJump
+              ? 'Connects to the jump host first, then to the server above from it. '
+                'Use the inner server\'s private address/port above.'
+              : 'Reach an inner server through a public bastion (like ssh -J).',
+          style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+        ),
+        if (_useJump) ...[
+          const SizedBox(height: 16),
+          Row(children: [
+            Expanded(
+              flex: 3,
+              child: TextField(
+                controller: _jumpHostController,
+                decoration: const InputDecoration(
+                    labelText: 'Jump host / IP', prefixIcon: Icon(Icons.alt_route)),
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              flex: 1,
+              child: TextField(
+                controller: _jumpPortController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Port'),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 16),
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _jumpUserController,
+                decoration: const InputDecoration(
+                    labelText: 'Username',
+                    hintText: 'same as target',
+                    prefixIcon: Icon(Icons.person_outline)),
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: TextField(
+                controller: _jumpPassController,
+                obscureText: true,
+                decoration: const InputDecoration(
+                    labelText: 'Password', prefixIcon: Icon(Icons.lock_outline)),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _jumpKeyController,
+            maxLines: 3,
+            decoration: const InputDecoration(
+                labelText: 'Jump host private key (optional)',
+                helperText: 'Leave password and key empty to reuse the target\'s credentials',
+                alignLabelWithHint: true),
+          ),
+        ],
+      ],
     );
   }
 
